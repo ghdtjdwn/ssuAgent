@@ -1,0 +1,33 @@
+[project]
+name = "ssu-agent"
+version = "0.1.0"
+description = "LangGraph campus assistant agent for Soongsil University"
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph>=0.3",
+    "langchain-mcp-adapters>=0.1",
+    "langchain-google-genai>=2",
+    "langchain-core>=0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
