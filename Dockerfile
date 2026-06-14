@@ -2,8 +2,11 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-RUN uv sync --no-dev --frozen
+# --no-install-project installs only deps (not the project itself) so ssu_agent/
+# directory is not needed yet — preserves Docker layer cache for dependency changes.
+RUN uv sync --no-dev --frozen --no-install-project
 COPY ssu_agent ./ssu_agent
+RUN uv sync --no-dev --frozen
 
 # Stage 2: minimal runtime image
 FROM python:3.12-slim AS runtime
