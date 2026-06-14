@@ -1,0 +1,88 @@
+# ADR-004: 멀티 LLM 프로바이더 자동 Fallback
+
+## Status
+Accepted (2026-06-15)
+
+## 배경
+
+ssuAgent는 초기에 `ChatGoogleGenerativeAI(model="gemini-2.5-flash")` 단일 모델만 사용했다.
+Gemini Free Tier는 RPD(일별 요청수), RPM(분당 요청수), TPM(분당 토큰) 세 가지 쿼타가 독립적으로 관리되며, 집중 개발/테스트 기간에 쿼타가 모두 소진됐다.
+
+쿼타 소진 시 `LangChain tenacity` retry가 기본 설정(최대 6회, 지수 백오프)으로 동작하여 `/agent/stream` 엔드포인트가 최대 수분간 응답 없이 hang 상태가 됐다. 프론트엔드에서는 "network error"로 표시.
+
+이전 대응은 `kubectl set env GEMINI_MODEL=gemini-2.5-flash-lite` 등으로 수동으로 모델을 교체하는 것이었는데, 개발자가 항상 모니터링할 수 없고 교체 후에도 다른 모델의 쿼타도 소진될 수 있었다.
+
+## 고려한 대안
+
+### 대안 A: Gemini 모델 목록 내에서 순환 (기존 방식)
+- `gemini-2.5-flash` → `gemini-2.0-flash` → `gemini-2.5-flash-lite` 등 Google 모델 내에서 수동 교체
+- **문제**: 모든 Gemini 모델이 같은 Google Cloud 프로젝트의 Free Tier 쿼타를 공유하므로, 한 모델이 소진되면 다른 모델도 곧 소진됨. 결국 모든 Gemini 모델이 동시에 429를 반환하는 상황이 반복됨
+
+### 대안 B: 유료 Gemini API 티어로 전환
+- 쿼타 걱정 없이 사용 가능
+- **문제**: 포트폴리오 프로젝트에서 LLM API 비용이 예측 불가능하게 발생할 수 있음. 또한 이미 다른 프로바이더의 API 키(Groq, OpenRouter 등)가 ssuMCP에 등록되어 있는데 활용하지 않는 것은 비효율
+
+### 대안 C (채택): LangChain `.with_fallbacks()` 로 멀티 프로바이더 체인
+- LangChain의 `RunnableWithFallbacks` 패턴으로 primary LLM 실패 시 자동으로 다음 프로바이더로 전환
+- 각 LLM에 `max_retries=1` 설정으로 tenacity retry 최소화 → 쿼타 소진 시 빠르게 다음 프로바이더로 이동
+- **선택 이유**:
+  - ssuMCP의 `ssuai-backend-secrets`에 이미 Groq, OpenRouter, Cerebras, Fireworks 등 다수 API 키 등록되어 있음
+  - LangChain 표준 API라 코드 변경 최소화 (`primary.with_fallbacks([groq_llm, openrouter_llm])`)
+  - 완전 자동 — 운영자 개입 없이 쿼타 소진 시 즉시 전환
+
+## 결정
+
+**Fallback 체인: Gemini 2.5 Flash → Groq Llama 3.3 70B → OpenRouter Llama 3.3 70B**
+
+```
+create_llm() 반환값:
+  ChatGoogleGenerativeAI(gemini-2.5-flash, max_retries=1)
+    .with_fallbacks([
+      ChatOpenAI(groq, llama-3.3-70b-versatile, max_retries=1),
+      ChatOpenAI(openrouter, meta-llama/llama-3.3-70b-instruct:free, max_retries=1)
+    ])
+```
+
+### 프로바이더 선택 근거
+
+| 프로바이더 | 모델 | 선택 이유 |
+|---|---|---|
+| Gemini 2.5 Flash | Primary | 한국어 품질 최우수, 기존 사용 모델 |
+| Groq Llama 3.3 70B | 1st fallback | 무료 티어, 매우 빠름(추론 속도 1위권), `langchain-openai`로 연결 가능 |
+| OpenRouter Llama 3.3 70B | 2nd fallback | 다수 오픈모델 접근 가능한 aggregator, 무료 모델 존재 |
+
+### 구현 포인트
+
+- `ssu_agent/llm_factory.py` 신설: 환경 변수 존재 여부에 따라 동적으로 fallback chain 구성
+- `GROQ_API_KEY`, `OPENROUTER_API_KEY` env var 없으면 해당 프로바이더 건너뜀 (Graceful degradation)
+- `supervisor/graph.py`, `agents/library.py`, `agents/academic.py`, `agents/lms.py` 모두 `create_llm()` 사용
+- `pyproject.toml`에 `langchain-openai` 추가 (OpenAI-compatible API 클라이언트)
+- k8s secret `ssuagent-secrets`에 `GROQ_API_KEY`, `OPENROUTER_API_KEY` 추가
+
+## 동작 방식
+
+1. 요청이 들어오면 primary(Gemini)로 LLM 호출
+2. Gemini가 429(쿼타 소진) 또는 기타 예외 발생 시 `RunnableWithFallbacks`가 자동으로 Groq으로 재시도
+3. Groq도 실패하면 OpenRouter로 재시도
+4. 세 곳 모두 실패하면 최종 예외 raise
+
+`max_retries=1` 설정으로 각 프로바이더에서 1회 재시도 후 빠르게 다음 프로바이더로 이동 (기존 기본값 6회 대비 응답 속도 개선).
+
+## 검증
+
+- 19개 unit test 통과 (mock LLM으로 fallback chain 구성 검증)
+- pod 내부에서 `gemini-2.5-flash` 직접 호출 → 2.5초 내 응답 확인
+- `GROQ_API_KEY`, `OPENROUTER_API_KEY` pod 환경 변수 주입 확인
+
+## 관련 파일 및 커밋
+
+- `ssu_agent/llm_factory.py` (신규)
+- `ssu_agent/config.py` (`GROQ_API_KEY`, `OPENROUTER_API_KEY` 추가)
+- `pyproject.toml`, `uv.lock` (`langchain-openai` 추가)
+- 커밋: `2541aa8` (feat), `5e36c10` (lint fix)
+
+## 예상 면접 질문
+
+1. LangChain `.with_fallbacks()`의 동작 원리는? 어떤 예외가 발생했을 때 fallback이 트리거되나요?
+2. `max_retries=1`로 설정한 이유는? 기본값과 비교해 트레이드오프는?
+3. 여러 LLM 프로바이더를 사용할 때 응답 포맷(특히 tool calling) 차이를 어떻게 처리하나요?
