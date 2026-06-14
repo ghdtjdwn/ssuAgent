@@ -60,7 +60,6 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import Command
 
-from ssu_agent import config
 from ssu_agent.agents.academic import build_academic_agent
 from ssu_agent.agents.library import build_library_agent
 from ssu_agent.agents.lms import build_lms_agent
