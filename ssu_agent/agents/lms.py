@@ -12,7 +12,7 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import create_react_agent
 
-from ssu_agent.llm_factory import create_llm
+from ssu_agent.llm_factory import create_llm, get_llm_sequence
 from ssu_agent.supervisor.state import SsuAgentState
 
 _SYSTEM_PROMPT_BASE = """당신은 숭실대학교 LMS(Canvas) 전문 AI 어시스턴트입니다.
@@ -44,19 +44,26 @@ def build_lms_agent(
     llm: BaseChatModel | None = None,
 ) -> StateGraph:
     """Build the LMS sub-agent graph."""
-    if llm is None:
-        llm = create_llm()
+    llm_seq = [llm] if llm is not None else get_llm_sequence()
+    if not llm_seq:
+        llm_seq = [create_llm()]
 
     async def agent_node(state: SsuAgentState) -> dict:
         mcp_session_id = state.get("mcp_session_id")
         prompt = _build_lms_prompt(mcp_session_id)
-        agent = create_react_agent(llm, lms_tools, prompt=prompt)
-        result = await agent.ainvoke({"messages": state["messages"]})
-        last = result["messages"][-1]
-        from langchain_core.messages import AIMessage
+        last_exc: Exception | None = None
+        for _llm in llm_seq:
+            try:
+                agent = create_react_agent(_llm, lms_tools, prompt=prompt)
+                result = await agent.ainvoke({"messages": state["messages"]})
+                last = result["messages"][-1]
+                from langchain_core.messages import AIMessage
 
-        tagged = AIMessage(content=f"[LMS 에이전트] {last.content}")
-        return {"messages": [tagged], "active_agent": None}
+                tagged = AIMessage(content=f"[LMS 에이전트] {last.content}")
+                return {"messages": [tagged], "active_agent": None}
+            except Exception as exc:
+                last_exc = exc
+        raise last_exc or RuntimeError("All LLM providers exhausted")
 
     graph = StateGraph(SsuAgentState)
     graph.add_node("agent", agent_node)
