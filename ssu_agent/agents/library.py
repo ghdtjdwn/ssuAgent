@@ -194,9 +194,7 @@ def build_library_agent(
 
                     hitl_triggered = False
                     for tc in response.tool_calls:
-                        matched = next(
-                            (t for t in agent_tools if t.name == tc["name"]), None
-                        )
+                        matched = next((t for t in agent_tools if t.name == tc["name"]), None)
                         if matched is None:
                             history.append(
                                 ToolMessage(
@@ -207,9 +205,7 @@ def build_library_agent(
                             continue
 
                         try:
-                            result = await matched.ainvoke(
-                                tc.get("args", {}), config=config
-                            )
+                            result = await matched.ainvoke(tc.get("args", {}), config=config)
                             content = (
                                 result
                                 if isinstance(result, str)
@@ -218,9 +214,7 @@ def build_library_agent(
                         except Exception as tool_exc:
                             content = f"Tool error: {tool_exc}"
 
-                        history.append(
-                            ToolMessage(content=content, tool_call_id=tc.get("id", ""))
-                        )
+                        history.append(ToolMessage(content=content, tool_call_id=tc.get("id", "")))
 
                         # If prepare_* returned an actionId let HITL router take over
                         if tc["name"] in _PREPARE_TOOL_NAMES:
@@ -239,7 +233,7 @@ def build_library_agent(
                     if hitl_triggered:
                         break
 
-                return {"messages": history[len(input_messages):]}
+                return {"messages": history[len(input_messages) :]}
             except Exception as exc:
                 last_exc = exc
 
