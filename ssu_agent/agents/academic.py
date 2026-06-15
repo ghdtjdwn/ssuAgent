@@ -79,9 +79,7 @@ def build_academic_agent(
                         break
 
                     for tc in response.tool_calls:
-                        matched = next(
-                            (t for t in academic_tools if t.name == tc["name"]), None
-                        )
+                        matched = next((t for t in academic_tools if t.name == tc["name"]), None)
                         if matched is None:
                             history.append(
                                 ToolMessage(
@@ -91,9 +89,7 @@ def build_academic_agent(
                             )
                             continue
                         try:
-                            result = await matched.ainvoke(
-                                tc.get("args", {}), config=config
-                            )
+                            result = await matched.ainvoke(tc.get("args", {}), config=config)
                             content = (
                                 result
                                 if isinstance(result, str)
@@ -101,14 +97,12 @@ def build_academic_agent(
                             )
                         except Exception as tool_exc:
                             content = f"Tool error: {tool_exc}"
-                        history.append(
-                            ToolMessage(content=content, tool_call_id=tc.get("id", ""))
-                        )
+                        history.append(ToolMessage(content=content, tool_call_id=tc.get("id", "")))
 
                 last_ai = next(
                     (
                         m
-                        for m in reversed(history[len(input_messages):])
+                        for m in reversed(history[len(input_messages) :])
                         if isinstance(m, AIMessage) and m.content
                     ),
                     None,
