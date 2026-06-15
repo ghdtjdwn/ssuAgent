@@ -44,7 +44,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import interrupt
 
-from ssu_agent.llm_factory import create_llm
+from ssu_agent.llm_factory import create_llm, get_llm_sequence
 from ssu_agent.supervisor.state import SsuAgentState
 
 _SYSTEM_PROMPT_BASE = """당신은 숭실대학교 도서관 전문 AI 어시스턴트입니다.
@@ -107,8 +107,10 @@ def build_library_agent(
 
     Call .compile(checkpointer=...) on the result before use.
     """
-    if llm is None:
-        llm = create_llm()
+    # llm_seq: single-item list when injected (tests), full sequence otherwise.
+    llm_seq = [llm] if llm is not None else get_llm_sequence()
+    if not llm_seq:
+        llm_seq = [create_llm()]
 
     # Strip confirm_action — handled by HITL gate node
     agent_tools = [t for t in library_tools if t.name not in _CONFIRM_TOOL_NAMES]
@@ -121,9 +123,15 @@ def build_library_agent(
     async def agent_node(state: SsuAgentState) -> dict:
         mcp_session_id = state.get("mcp_session_id")
         prompt = _build_library_prompt(mcp_session_id)
-        inner = create_react_agent(llm, agent_tools, prompt=prompt)
-        result = await inner.ainvoke({"messages": state["messages"]})
-        return {"messages": result["messages"]}
+        last_exc: Exception | None = None
+        for _llm in llm_seq:
+            try:
+                inner = create_react_agent(_llm, agent_tools, prompt=prompt)
+                result = await inner.ainvoke({"messages": state["messages"]})
+                return {"messages": result["messages"]}
+            except Exception as exc:
+                last_exc = exc
+        raise last_exc or RuntimeError("All LLM providers exhausted")
 
     async def check_approval_node(state: SsuAgentState) -> dict:
         """HITL gate: interrupt for human approval, then execute or cancel."""
