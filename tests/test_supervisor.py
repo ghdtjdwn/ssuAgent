@@ -66,6 +66,30 @@ def start_auth(provider: str) -> str:
     return '{"loginUrl": "https://example.com/login"}'
 
 
+@tool
+def get_my_lms_courses(mcp_session_id: str) -> str:
+    """수강 과목 목록 조회"""
+    return '{"courses": []}'
+
+
+@tool
+def get_my_lms_materials(mcp_session_id: str) -> str:
+    """비영상 자료 목록 조회"""
+    return '{"materials": []}'
+
+
+@tool
+def prepare_lms_material_export(mcp_session_id: str) -> str:
+    """내보낼 자료 검증 및 확인 요청 생성"""
+    return '{"status": "OK"}'
+
+
+@tool
+def confirm_lms_material_export(mcp_session_id: str) -> str:
+    """확인 후 ZIP 내보내기 시작"""
+    return '{"downloadUrl": "https://example.com/download"}'
+
+
 MOCK_TOOLS = [
     get_today_meal,
     get_my_grades,
@@ -75,6 +99,10 @@ MOCK_TOOLS = [
     prepare_reserve_library_seat,
     confirm_action,
     start_auth,
+    get_my_lms_courses,
+    get_my_lms_materials,
+    prepare_lms_material_export,
+    confirm_lms_material_export,
 ]
 
 
@@ -98,8 +126,22 @@ def test_categorise_splits_academic_tools():
 def test_categorise_splits_lms_tools():
     cats = categorise_tools(MOCK_TOOLS)
     lms_names = {t.name for t in cats["lms"]}
+    library_names = {t.name for t in cats["library"]}
+
     assert "get_my_assignments" in lms_names
     assert "get_lms_dashboard" in lms_names
+    # New LMS export tools must reach LMS agent
+    assert "get_my_lms_courses" in lms_names
+    assert "get_my_lms_materials" in lms_names
+    assert "prepare_lms_material_export" in lms_names   # THE BUG FIX TEST
+    assert "confirm_lms_material_export" in lms_names
+
+    # Library tools must NOT be mis-routed
+    assert "prepare_reserve_library_seat" in library_names
+    assert "confirm_action" in library_names
+
+    # prepare_lms_material_export must NOT be in library (the bug this PR fixes)
+    assert "prepare_lms_material_export" not in library_names
 
 
 def test_categorise_public_tools():
