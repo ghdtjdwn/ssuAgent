@@ -74,13 +74,17 @@ _LIBRARY_PREFIXES = (
     "recommend_library",
     "search_library",
     "get_my_library",
-    "prepare_",
-    "confirm_action",
     "wait_for_library",
     "get_library_wait",
     "cancel_library_wait",
     "get_room_available",
 )
+_LIBRARY_NAMES = {
+    "prepare_reserve_library_seat",
+    "prepare_swap_library_seat",
+    "prepare_cancel_library_seat",
+    "confirm_action",
+}
 _ACADEMIC_NAMES = {
     "get_my_grades",
     "check_graduation_requirements",
@@ -101,6 +105,11 @@ _LMS_NAMES = {
     "get_my_assignments",
     "get_my_lms_terms",
     "get_lms_dashboard",
+    # new in Phase C
+    "get_my_lms_courses",
+    "get_my_lms_materials",
+    "prepare_lms_material_export",
+    "confirm_lms_material_export",
 }
 _AUTH_NAMES = {"start_auth", "get_auth_status", "logout_provider", "logout_all"}
 
@@ -116,7 +125,7 @@ def categorise_tools(all_tools: list[BaseTool]) -> dict[str, list[BaseTool]]:
     }
     for t in all_tools:
         name = t.name
-        if any(name.startswith(p) for p in _LIBRARY_PREFIXES) or name in {"confirm_action"}:
+        if any(name.startswith(p) for p in _LIBRARY_PREFIXES) or name in _LIBRARY_NAMES:
             cats["library"].append(t)
         elif name in _ACADEMIC_NAMES:
             cats["academic"].append(t)
@@ -160,8 +169,10 @@ def _make_routing_tools() -> list[BaseTool]:
     def transfer_to_lms_agent(query: str) -> str:
         """Transfer to LMS Agent.
 
-        Use for: assignments, LMS terms, deadlines, and LMS dashboard
-        (학사 대시보드 - 과제 마감·시험 일정·공지 통합 조회).
+        Use for: assignments, LMS terms, deadlines, LMS dashboard
+        (학사 대시보드 - 과제 마감·시험 일정·공지 통합 조회), LMS course list (과목 목록 조회),
+        LMS materials list (강의자료 목록 조회), and LMS non-video material ZIP export
+        (비영상 자료 ZIP 내보내기).
         Provide `query` with the user's specific request.
         """
         return f"{_ROUTE_PREFIX}lms_agent"
@@ -179,8 +190,12 @@ _SUPERVISOR_PROMPT = """당신은 숭실대학교 AI 어시스턴트입니다.
 2. 도서관(library), 학사(academic), LMS 관련 전문 질문은 해당 에이전트로 전달합니다:
    - 도서관 좌석/예약/도서 → transfer_to_library_agent
    - 성적/졸업/장학/학칙 → transfer_to_academic_agent
-   - LMS 과제, 마감일, 시험 일정, 공지사항(대시보드)
-     → transfer_to_lms_agent (get_lms_dashboard 사용 가능)
+   - LMS 과제, 마감일, 시험 일정, 공지사항(대시보드), 강의자료 조회 및 비영상 자료 ZIP 내보내기(LMS 다운로드)
+     → transfer_to_lms_agent
+
+LMS 강의자료 내보내기 플로우 안내:
+사용자가 LMS 강의자료 다운로드나 내보내기를 요청하면 transfer_to_lms_agent로 전달하십시오. 해당 에이전트는 다음 단계를 거칩니다:
+get_my_lms_courses → get_my_lms_materials → prepare_lms_material_export → confirm_lms_material_export → 다운로드 링크 제공 (유효기간 20분).
 
 전달 시 사용자의 원래 질문을 query에 그대로 포함하세요.
 이미 하위 에이전트 답변([도서관/학사/LMS 에이전트])이 대화에 있다면
