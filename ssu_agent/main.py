@@ -47,17 +47,39 @@ import secrets
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from ssu_agent import config
 from ssu_agent.supervisor.graph import build_supervisor_graph
 
 logger = logging.getLogger(__name__)
+
+
+def _client_ip(request: Request) -> str:
+    """Per-IP key for rate limiting. Behind the k3s ingress every request shares
+    the ingress socket address, so prefer the left-most X-Forwarded-For hop (the
+    real client) and fall back to the socket address. Mirrors ssuMCP
+    ClientIpResolver (ADR 0061)."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    return get_remote_address(request)
+
+
+# Per-IP inbound throttle on /agent/* (mirrors ssuMCP ADR 0061): the endpoints
+# fan out to paid LLM providers, so an unauthenticated flood is a cost/DoS risk.
+# In-memory storage = per-process (prod runs a single replica; documented caveat).
+limiter = Limiter(key_func=_client_ip)
 
 # Graph reference — set during lifespan startup
 _graph = None
@@ -105,11 +127,14 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ssuAgent", version="0.2.0", lifespan=_lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.ALLOWED_ORIGINS,
-    allow_methods=["*"],
+    # Narrowed from "*": the API only serves POST /agent/* and GET /health.
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -138,7 +163,8 @@ async def verify_agent_key(x_agent_key: str | None = Header(default=None)) -> No
 
 
 class AgentRequest(BaseModel):
-    message: str
+    # Oversized-payload guard: cap the free-text message (config-tunable).
+    message: str = Field(max_length=config.AGENT_MAX_MESSAGE_CHARS)
     thread_id: str = ""  # "" → new conversation
     mcp_session_id: str | None = None
 
@@ -195,9 +221,13 @@ async def _stream_graph(input_data: dict | object, config: dict):
                 yield _sse({"type": "interrupt", "data": interrupt_data})
                 return  # Pause SSE; client waits for /agent/resume
 
-    except Exception as exc:
+    except Exception:
+        # Do not reflect the exception detail to the client — it can carry
+        # internal stack / DB context. The full traceback is logged server-side.
         logger.exception("agent stream failed")
-        yield _sse({"type": "error", "message": str(exc)})
+        yield _sse(
+            {"type": "error", "message": "처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."}
+        )
         return
 
     yield _sse({"type": "done"})
@@ -207,7 +237,8 @@ async def _stream_graph(input_data: dict | object, config: dict):
 
 
 @app.post("/agent/stream", dependencies=[Depends(verify_agent_key)])
-async def stream_agent(req: AgentRequest):
+@limiter.limit(lambda: config.AGENT_RATE_LIMIT)
+async def stream_agent(request: Request, req: AgentRequest):
     """Start or continue a conversation. Streams SSE events."""
     thread_id = req.thread_id or str(uuid.uuid4())
     initial_state = {
@@ -230,7 +261,8 @@ async def stream_agent(req: AgentRequest):
 
 
 @app.post("/agent/resume", dependencies=[Depends(verify_agent_key)])
-async def resume_agent(req: ResumeRequest):
+@limiter.limit(lambda: config.AGENT_RATE_LIMIT)
+async def resume_agent(request: Request, req: ResumeRequest):
     """Resume a graph paused by a library HITL interrupt.
 
     The client sends {approved: bool, action_id: int} after the user decides.
