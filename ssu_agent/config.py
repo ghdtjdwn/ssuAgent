@@ -25,3 +25,11 @@ ALLOWED_ORIGINS: list[str] = [
 # is a no-op so existing prod behavior is preserved; when set, requests must
 # send a matching X-Agent-Key header.
 AGENT_API_KEY: str = os.getenv("AGENT_API_KEY", "").strip()
+
+# Per-IP inbound rate limit for /agent/* (slowapi syntax, e.g. "30/minute").
+# Mirrors ssuMCP ADR 0061: these endpoints fan out to paid LLM providers, so an
+# unauthenticated request flood is a cost-exhaustion / DoS vector.
+AGENT_RATE_LIMIT: str = os.getenv("AGENT_RATE_LIMIT", "30/minute").strip()
+
+# Max characters accepted in a single agent message (oversized-payload guard).
+AGENT_MAX_MESSAGE_CHARS: int = int(os.getenv("AGENT_MAX_MESSAGE_CHARS", "8000"))

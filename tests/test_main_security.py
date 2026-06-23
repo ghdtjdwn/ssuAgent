@@ -24,6 +24,9 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     # Endpoints resolve _stream_graph as a module global at call time, so this
     # monkeypatch takes effect without rebuilding the app.
     monkeypatch.setattr(main, "_stream_graph", _fake_stream_graph)
+    # Disable per-IP rate limiting by default so functional tests are not
+    # throttled; the dedicated rate-limit test re-enables it.
+    monkeypatch.setattr(main.limiter, "enabled", False)
     # Bare TestClient: no `with`, so lifespan/Postgres pool is never opened.
     return TestClient(main.app)
 
@@ -78,3 +81,42 @@ def test_health_open_even_with_api_key(monkeypatch: pytest.MonkeyPatch, client: 
     monkeypatch.setattr(config, "AGENT_API_KEY", "s3cret")
     resp = client.get("/health")
     assert resp.status_code == 200
+
+
+# ── Edge hardening: rate limit, payload cap, error non-disclosure ───────────────
+
+
+def test_stream_rate_limited_over_limit(monkeypatch: pytest.MonkeyPatch, client: TestClient):
+    # Limit is read per-request (callable), so a low override takes effect.
+    monkeypatch.setattr(config, "AGENT_API_KEY", "")
+    monkeypatch.setattr(config, "AGENT_RATE_LIMIT", "3/minute")
+    monkeypatch.setattr(main.limiter, "enabled", True)
+    statuses = [_post_stream(client).status_code for _ in range(5)]
+    assert statuses[:3] == [200, 200, 200]
+    assert 429 in statuses[3:]
+
+
+def test_stream_rejects_oversized_message(monkeypatch: pytest.MonkeyPatch, client: TestClient):
+    monkeypatch.setattr(config, "AGENT_API_KEY", "")
+    huge = "x" * (config.AGENT_MAX_MESSAGE_CHARS + 1)
+    resp = client.post("/agent/stream", json={"message": huge, "thread_id": "t1"})
+    assert resp.status_code == 422
+
+
+async def test_stream_graph_hides_exception_detail(monkeypatch: pytest.MonkeyPatch):
+    """The error SSE must not leak internal exception detail to the client."""
+
+    class _Boom:
+        def astream_events(self, *args, **kwargs):
+            raise RuntimeError("internal dsn postgres://secret leaked")
+
+    monkeypatch.setattr(main, "_graph", _Boom())
+    chunks = [
+        chunk
+        async for chunk in main._stream_graph(
+            {"messages": []}, {"configurable": {"thread_id": "t1"}}
+        )
+    ]
+    joined = "".join(chunks)
+    assert "postgres://secret" not in joined
+    assert '"type": "error"' in joined
