@@ -19,8 +19,68 @@ async def _fake_stream_graph(input_data, config):  # noqa: A002 - mirrors prod s
     yield 'data: {"type": "done"}\n\n'
 
 
+class _FakeOwnerCursor:
+    def __init__(self, owners: dict[str, str | None]):
+        self.owners = owners
+        self._row: tuple[str | None] | None = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def execute(self, query: str, params: tuple | None = None):
+        normalized = " ".join(query.split()).upper()
+        if normalized.startswith("INSERT INTO THREAD_OWNERS"):
+            thread_id, owner = params
+            self.owners.setdefault(thread_id, owner)
+            self._row = None
+            return
+        if normalized.startswith("SELECT OWNER FROM THREAD_OWNERS"):
+            (thread_id,) = params
+            self._row = (self.owners[thread_id],) if thread_id in self.owners else None
+            return
+        if normalized.startswith("CREATE TABLE IF NOT EXISTS THREAD_OWNERS"):
+            self._row = None
+            return
+        raise AssertionError(f"unexpected query: {query}")
+
+    async def fetchone(self):
+        return self._row
+
+
+class _FakeOwnerConnection:
+    def __init__(self, owners: dict[str, str | None]):
+        self.owners = owners
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    def cursor(self):
+        return _FakeOwnerCursor(self.owners)
+
+
+class _FakeOwnerPool:
+    def __init__(self):
+        self.owners: dict[str, str | None] = {}
+
+    def connection(self):
+        return _FakeOwnerConnection(self.owners)
+
+
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def owner_pool(monkeypatch: pytest.MonkeyPatch) -> _FakeOwnerPool:
+    pool = _FakeOwnerPool()
+    monkeypatch.setattr(main, "_pool", pool)
+    return pool
+
+
+@pytest.fixture
+def client(monkeypatch: pytest.MonkeyPatch, owner_pool: _FakeOwnerPool) -> TestClient:
     # Endpoints resolve _stream_graph as a module global at call time, so this
     # monkeypatch takes effect without rebuilding the app.
     monkeypatch.setattr(main, "_stream_graph", _fake_stream_graph)
@@ -53,6 +113,77 @@ def test_health_open(client: TestClient):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "UP"
+
+
+# ── Thread ownership binding ──────────────────────────────────────────────────
+
+
+def test_stream_binds_new_thread_and_allows_same_owner(
+    client: TestClient,
+    owner_pool: _FakeOwnerPool,
+):
+    resp = client.post(
+        "/agent/stream",
+        json={"message": "hi", "thread_id": "owned-t1", "mcp_session_id": "mcp-a"},
+    )
+    assert resp.status_code == 200
+    assert owner_pool.owners["owned-t1"] == "mcp-a"
+
+    resp = client.post(
+        "/agent/stream",
+        json={"message": "again", "thread_id": "owned-t1", "mcp_session_id": "mcp-a"},
+    )
+    assert resp.status_code == 200
+
+
+def test_stream_rejects_different_owner(client: TestClient):
+    resp = client.post(
+        "/agent/stream",
+        json={"message": "hi", "thread_id": "owned-t2", "mcp_session_id": "mcp-a"},
+    )
+    assert resp.status_code == 200
+
+    resp = client.post(
+        "/agent/stream",
+        json={"message": "steal", "thread_id": "owned-t2", "mcp_session_id": "mcp-b"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "이 대화는 현재 세션의 소유가 아닙니다."
+
+
+def test_stream_allows_anonymous_thread(client: TestClient, owner_pool: _FakeOwnerPool):
+    resp = client.post(
+        "/agent/stream",
+        json={"message": "hi", "thread_id": "anon-t1"},
+    )
+    assert resp.status_code == 200
+    assert owner_pool.owners["anon-t1"] is None
+
+    resp = client.post(
+        "/agent/stream",
+        json={"message": "again", "thread_id": "anon-t1", "mcp_session_id": "mcp-a"},
+    )
+    assert resp.status_code == 200
+    assert owner_pool.owners["anon-t1"] is None
+
+
+def test_resume_rejects_different_owner(client: TestClient):
+    resp = client.post(
+        "/agent/stream",
+        json={"message": "hi", "thread_id": "resume-t1", "mcp_session_id": "mcp-a"},
+    )
+    assert resp.status_code == 200
+
+    resp = client.post(
+        "/agent/resume",
+        json={
+            "thread_id": "resume-t1",
+            "approved": True,
+            "action_id": 1,
+            "mcp_session_id": "mcp-b",
+        },
+    )
+    assert resp.status_code == 403
 
 
 # ── Key configured → header required ────────────────────────────────────────────
