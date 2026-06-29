@@ -22,16 +22,20 @@ MCP session lifecycle (thread_id ↔ mcp_session_id):
   The two IDs are intentionally separate:
   - thread_id: conversation persistence (Postgres checkpoint)
   - mcp_session_id: ssuMCP auth (externally managed by ssuAI login flow)
-  A single thread can switch mcp_session_id across requests (e.g. re-login),
-  so the graph always takes the latest value from the request rather than
-  reading it from checkpoint.
+  A thread is bound to the mcp_session_id that first creates it via the
+  thread_owners table. Anonymous threads (owner NULL) remain accessible without
+  upgrading ownership; authenticated threads reject access from another session.
+  The graph still takes the latest mcp_session_id from the request for MCP tool
+  calls after ownership is verified.
 
 Checkpointer (Postgres):
   Uses AsyncPostgresSaver from langgraph-checkpoint-postgres backed by
   an AsyncConnectionPool (psycopg3). autocommit=True is required by LangGraph.
-  setup() creates the checkpoint tables on first startup.
+  setup() creates the checkpoint tables on first startup. The same pool also
+  creates thread_owners, which binds client-supplied thread_id values to the
+  creating mcp_session_id.
 
-Streaming optimisation (Gemini suggestion applied):
+Streaming optimisation:
   astream_events(version="v2") yields rich event dicts. We filter:
   - on_chat_model_stream   → text chunks (user sees typing)
   - on_tool_start          → handoff/tool events (user sees "routing...")
@@ -81,8 +85,11 @@ def _client_ip(request: Request) -> str:
 # In-memory storage = per-process (prod runs a single replica; documented caveat).
 limiter = Limiter(key_func=_client_ip)
 
-# Graph reference — set during lifespan startup
+# Graph and pool references — set during lifespan startup
 _graph = None
+_pool: AsyncConnectionPool | None = None
+
+_THREAD_OWNER_FORBIDDEN_DETAIL = "이 대화는 현재 세션의 소유가 아닙니다."
 
 _TOOL_LABELS: dict[str, str] = {
     "prepare_reserve_library_seat": "좌석 예약 준비 중...",
@@ -114,16 +121,36 @@ _TOOL_LABELS: dict[str, str] = {
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """FastAPI lifespan: open Postgres connection pool, build graph, keep alive."""
-    global _graph
+    global _graph, _pool
     async with AsyncConnectionPool(
         conninfo=config.DATABASE_URL,
         max_size=5,
         kwargs={"autocommit": True, "prepare_threshold": 0},
     ) as pool:
-        checkpointer = AsyncPostgresSaver(pool)
-        await checkpointer.setup()
-        _graph = await build_supervisor_graph(checkpointer=checkpointer)
-        yield
+        try:
+            checkpointer = AsyncPostgresSaver(pool)
+            await checkpointer.setup()
+            await _setup_thread_owners(pool)
+            _pool = pool
+            _graph = await build_supervisor_graph(checkpointer=checkpointer)
+            yield
+        finally:
+            _graph = None
+            _pool = None
+
+
+async def _setup_thread_owners(pool: AsyncConnectionPool) -> None:
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS thread_owners (
+                    thread_id TEXT PRIMARY KEY,
+                    owner TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
 
 
 app = FastAPI(title="ssuAgent", version="0.2.0", lifespan=_lifespan)
@@ -157,6 +184,35 @@ async def verify_agent_key(x_agent_key: str | None = Header(default=None)) -> No
         return
     if not x_agent_key or not secrets.compare_digest(x_agent_key, expected):
         raise HTTPException(status_code=401, detail="Invalid or missing X-Agent-Key")
+
+
+async def claim_or_verify_thread_owner(thread_id: str, mcp_session_id: str | None) -> None:
+    """Bind a new thread to its creating MCP session, or verify existing owner."""
+    if _pool is None:
+        raise HTTPException(status_code=503, detail="Agent storage is not ready")
+
+    async with _pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO thread_owners (thread_id, owner)
+                VALUES (%s, %s)
+                ON CONFLICT (thread_id) DO NOTHING
+                """,
+                (thread_id, mcp_session_id),
+            )
+            await cur.execute(
+                "SELECT owner FROM thread_owners WHERE thread_id = %s",
+                (thread_id,),
+            )
+            row = await cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=503, detail="Agent storage is not ready")
+
+    stored_owner = row[0]
+    if stored_owner is not None and stored_owner != mcp_session_id:
+        raise HTTPException(status_code=403, detail=_THREAD_OWNER_FORBIDDEN_DETAIL)
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -241,6 +297,7 @@ async def _stream_graph(input_data: dict | object, config: dict):
 async def stream_agent(request: Request, req: AgentRequest):
     """Start or continue a conversation. Streams SSE events."""
     thread_id = req.thread_id or str(uuid.uuid4())
+    await claim_or_verify_thread_owner(thread_id, req.mcp_session_id)
     initial_state = {
         "messages": [{"role": "user", "content": req.message}],
         "mcp_session_id": req.mcp_session_id,
@@ -271,6 +328,7 @@ async def resume_agent(request: Request, req: ResumeRequest):
     """
     from langgraph.types import Command
 
+    await claim_or_verify_thread_owner(req.thread_id, req.mcp_session_id)
     resume_payload = {
         "approved": req.approved,
         "action_id": req.action_id,
