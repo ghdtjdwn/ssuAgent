@@ -3,6 +3,8 @@
 작성일: 2026-06-14  
 상태: 확정(구현 완료)
 
+> **갱신 (2026-07-02)**: §3·§6·§8이 기술하는 SQLite(`SqliteSaver`) 체크포인터는 이후 [ADR 003](003-postgres-checkpointer.md)에서 `AsyncPostgresSaver`(Postgres)로 대체됐다(현행 코드 `main.py`). 현행 체크포인터는 ADR 003을 참조. 나머지 아키텍처 결정은 그대로 유효하다.
+
 ---
 
 ## 1. 배경 및 문제

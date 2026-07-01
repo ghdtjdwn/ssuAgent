@@ -86,3 +86,20 @@ create_llm() 반환값:
 1. LangChain `.with_fallbacks()`의 동작 원리는? 어떤 예외가 발생했을 때 fallback이 트리거되나요?
 2. `max_retries=1`로 설정한 이유는? 기본값과 비교해 트레이드오프는?
 3. 여러 LLM 프로바이더를 사용할 때 응답 포맷(특히 tool calling) 차이를 어떻게 처리하나요?
+
+## 갱신 (2026-07-02) — 실제 출하 구현과의 차이
+
+위 원문은 채택 시점(2026-06-15)의 설계를 기록한 역사적 문서로 보존한다. 이후 구현 과정에서 세 가지가 바뀌었고, 최종 출하 상태는 다음과 같다 (`ssu_agent/llm_factory.py` 기준):
+
+1. **메커니즘: `RunnableWithFallbacks` → `get_llm_sequence()` + 에이전트별 수동 retry 루프**
+   - langchain_core 1.4.x의 `RunnableWithFallbacks`는 `bind_tools`를 지원하지 않아, `create_react_agent`가 내부에서 `model.bind_tools()`를 호출하는 순간 `.with_fallbacks()` 체인이 깨진다 (`llm_factory.py` 상단 NOTE).
+   - 따라서 `create_llm()`이 폴백 체인을 반환하는 대신, `get_llm_sequence()`가 우선순위 순 LLM 리스트를 반환하고 각 에이전트가 수동 retry 루프에서 순서대로 시도한다.
+
+2. **폴백 순서: Gemini-first → Groq-first**
+   - 최종 순서: **Groq(llama-3.3-70b-versatile) → Gemini(`GEMINI_MODEL`, 기본 gemini-2.5-flash) → OpenRouter(meta-llama/llama-3.3-70b-instruct:free)**
+   - 이유: Groq free tier는 14,400 req/day로 Gemini free tier(20 req/day)보다 쿼타가 훨씬 크고 추론 속도도 매우 빠르다. Gemini는 한국어 품질이 높아 2순위로 유지, OpenRouter는 catch-all aggregator로 최후순위 (`llm_factory.py` docstring, README).
+
+3. **Groq 클라이언트: `ChatOpenAI`(base_url) → `ChatGroq`**
+   - 제네릭 `ChatOpenAI` 래퍼는 assistant content를 content-block 리스트로 직렬화하는데, Groq API가 두 번째 tool call turn에서 이를 400으로 거부한다. `ChatGroq`는 string-content 변환을 내부에서 처리한다 (`fix/chatgroq-message-format`).
+
+프로바이더 순서 회귀는 `tests/test_llm_factory.py`의 provider-order 테스트로 고정된다.

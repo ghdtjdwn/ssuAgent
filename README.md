@@ -74,13 +74,16 @@ curl -N -X POST http://localhost:8000/agent/stream \
 
 ## Security / configuration
 
-Wave 4 보안 하드닝으로 추가된 환경변수(모두 선택, 기본값은 기존 prod 동작 보존):
+주요 런타임 환경변수(모두 선택, 기본값은 기존 prod 동작 보존):
 
 | 환경변수 | 기본값 | 역할 |
 |---|---|---|
 | `ALLOWED_ORIGINS` | `*` (전체 허용) | CORS allow-list. 콤마로 구분한 origin 목록(`config.py`에서 파싱 → `main.py` `CORSMiddleware`). 단일 `*`이면 기존처럼 전체 허용. 실제 프론트엔드 origin으로 좁히면 CORS 보호가 활성화된다. |
 | `AGENT_API_KEY` | 비어 있음(게이트 off) | `/agent/*` 엔드포인트의 **opt-in** API 키 게이트(`main.py`의 `verify_agent_key` 의존성). 비어 있으면 no-op(기존 prod 동작 그대로). 설정하면 모든 `/agent` 요청이 일치하는 `X-Agent-Key` 헤더를 보내야 하며(`secrets.compare_digest`로 타이밍 공격 방어), 없거나 틀리면 401. |
+| `AGENT_RATE_LIMIT` | `30/minute` | `/agent/stream`·`/agent/resume`의 per-IP 인바운드 rate limit(slowapi 문법, `main.py`의 `limiter`). 키는 X-Forwarded-For 좌측 홉(ingress 뒤 실클라이언트 IP). 초과 시 429. 배경은 ADR 0009. |
+| `AGENT_MAX_MESSAGE_CHARS` | `8000` | 단일 요청 `message`의 최대 문자 수(pydantic `Field(max_length=…)`). 초과 시 422(oversized-payload 가드, ADR 0009). |
 | LLM 키 | — | `GROQ_API_KEY`/`GOOGLE_API_KEY`/`OPENROUTER_API_KEY` 중 설정된 것만 폴백 시퀀스에 포함(위 Architecture 참조). |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini 프로바이더가 사용할 모델명(`llm_factory.py`, `GOOGLE_API_KEY` 설정 시에만 사용). |
 
 ### Thread ownership binding
 

@@ -54,3 +54,22 @@ def test_gemini_not_added_without_key(monkeypatch: pytest.MonkeyPatch):
     sequence = llm_factory.get_llm_sequence()
     assert len(sequence) == 1
     assert isinstance(sequence[0], ChatGroq)
+
+
+def test_all_keys_yield_groq_gemini_openrouter_in_order(monkeypatch: pytest.MonkeyPatch):
+    """All three keys set → fallback priority is exactly Groq → Gemini → OpenRouter.
+
+    Guards the provider order (Groq first for its larger free-tier quota); the
+    OpenRouter client is a ChatOpenAI pointed at the OpenRouter base_url.
+    """
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_groq import ChatGroq
+    from langchain_openai import ChatOpenAI
+
+    _clear_keys(monkeypatch)
+    monkeypatch.setattr(config, "GROQ_API_KEY", "test-groq-key")
+    monkeypatch.setattr(config, "GOOGLE_API_KEY", "test-google-key")
+    monkeypatch.setattr(config, "OPENROUTER_API_KEY", "test-openrouter-key")
+
+    sequence = llm_factory.get_llm_sequence()
+    assert [type(llm) for llm in sequence] == [ChatGroq, ChatGoogleGenerativeAI, ChatOpenAI]
