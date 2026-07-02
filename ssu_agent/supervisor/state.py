@@ -4,7 +4,6 @@ SsuAgentState — LangGraph multi-agent shared state.
 Design decision (ADR): single shared TypedDict across supervisor + sub-agents.
 - messages: Annotated[list, add_messages] is the merge channel (all agents append here).
 - active_agent: set by supervisor when routing, cleared when sub-agent finishes.
-- pending_action: private to Library agent; holds prepare_* result awaiting HITL approval.
 - mcp_session_id: passed from the FastAPI client, threaded to all private MCP tool calls.
 
 Why a single state rather than per-agent TypedDicts:
@@ -38,9 +37,3 @@ class SsuAgentState(TypedDict):
     # Set by supervisor before routing; cleared by sub-agent on return.
     # Used to detect re-entry to supervisor after sub-agent completion.
     active_agent: str | None
-
-    # ── HITL (Library write actions) ──────────────────────────────────────────
-    # Library agent populates this when a prepare_* tool returns an action_id.
-    # interrupt() pauses the graph; FastAPI streams the payload to the client.
-    # Resume path: client sends /agent/resume with {approved: bool, action_id: int}.
-    pending_action: dict | None

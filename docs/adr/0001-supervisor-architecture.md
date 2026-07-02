@@ -111,6 +111,8 @@ class SsuAgentState(TypedDict):
 | `active_agent` | plain override | post_supervisor (set), 서브에이전트 (clear) | 현재 활성 에이전트 추적 |
 | `pending_action` | plain override | check_approval_node (clear on completion) | 미사용 (향후 다중 동시 prepare 대응용) |
 
+> **갱신 (2026-07-02)**: 위 `pending_action` 필드는 어디서도 읽히지 않는 예약 필드였고(쓰기도 `None`뿐), dead code로 상태 스키마에서 제거됐다 — HITL 감지는 `messages` 스캔(`_extract_action_id`)으로 동작한다.
+
 **`add_messages` reducer가 필요한 이유**: 수퍼바이저와 세 서브에이전트 모두 `messages`에 쓴다. 단순 override(`messages: list[BaseMessage]`)를 쓰면 나중에 실행된 에이전트가 이전 대화 기록을 덮어쓴다.
 
 ---

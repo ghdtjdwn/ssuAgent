@@ -57,7 +57,6 @@ async def test_academic_agent_tags_response():
         "messages": [HumanMessage(content="졸업 학점이 몇 점이야?")],
         "mcp_session_id": None,
         "active_agent": "academic",
-        "pending_action": None,
     }
     result = await graph.ainvoke(state)
 

@@ -139,7 +139,6 @@ async def test_library_agent_interrupt_on_prepare():
         "messages": [HumanMessage(content="B-007 예약해줘")],
         "mcp_session_id": "sess-001",
         "active_agent": "library",
-        "pending_action": None,
     }
     config = {"configurable": {"thread_id": "lib-test-001"}}
 

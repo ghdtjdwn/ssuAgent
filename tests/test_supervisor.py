@@ -164,7 +164,6 @@ def test_state_has_required_keys():
         "messages": [HumanMessage(content="안녕")],
         "mcp_session_id": "test-session",
         "active_agent": None,
-        "pending_action": None,
     }
     assert state["mcp_session_id"] == "test-session"
     assert state["active_agent"] is None
@@ -218,7 +217,6 @@ async def test_graph_initial_state_has_mcp_session():
             "messages": [HumanMessage(content="안녕")],
             "mcp_session_id": "session-abc",
             "active_agent": None,
-            "pending_action": None,
         },
         config=config,
     )
@@ -243,7 +241,6 @@ def test_route_marker_regex():
         ],
         "mcp_session_id": None,
         "active_agent": None,
-        "pending_action": None,
     }
     cmd = _post_supervisor(state)
     assert cmd.goto == "library_agent"
@@ -261,7 +258,6 @@ def test_no_route_marker_goes_to_end():
         ],
         "mcp_session_id": None,
         "active_agent": None,
-        "pending_action": None,
     }
     from langgraph.graph import END
 

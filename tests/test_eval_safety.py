@@ -62,7 +62,6 @@ def test_session_id_not_in_final_answer() -> None:
         ],
         "mcp_session_id": _SECRET_SESSION,
         "active_agent": "library_agent",
-        "pending_action": None,
     }
 
     final = _final_ai_content(state)
@@ -149,7 +148,6 @@ def test_tool_response_with_session_id_not_echoed_in_final_message() -> None:
         ],
         "mcp_session_id": _SECRET_SESSION,
         "active_agent": None,
-        "pending_action": None,
     }
 
     final = _final_ai_content(state)

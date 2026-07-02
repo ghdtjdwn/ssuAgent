@@ -35,7 +35,6 @@ Parent-Child State design:
   All nodes share SsuAgentState (single TypedDict). The messages channel uses
   add_messages reducer so all agents append to the same conversation thread.
   active_agent is set by post_supervisor and cleared by sub-agents on return.
-  pending_action is set by Library HITL node and cleared by execute_confirm.
 
 MCP session lifecycle:
   thread_id (LangGraph checkpoint key) maps 1:1 with a FastAPI client
