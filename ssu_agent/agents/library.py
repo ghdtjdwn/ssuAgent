@@ -260,7 +260,7 @@ def build_library_agent(
         else:
             msg = AIMessage(content="[도서관 에이전트] 예약이 취소되었습니다.")
 
-        return {"messages": [msg], "pending_action": None, "active_agent": None}
+        return {"messages": [msg], "active_agent": None}
 
     def done_node(state: SsuAgentState) -> dict:
         return {"active_agent": None}

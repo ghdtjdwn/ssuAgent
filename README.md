@@ -82,6 +82,7 @@ curl -N -X POST http://localhost:8000/agent/stream \
 | `AGENT_API_KEY` | 비어 있음(게이트 off) | `/agent/*` 엔드포인트의 **opt-in** API 키 게이트(`main.py`의 `verify_agent_key` 의존성). 비어 있으면 no-op(기존 prod 동작 그대로). 설정하면 모든 `/agent` 요청이 일치하는 `X-Agent-Key` 헤더를 보내야 하며(`secrets.compare_digest`로 타이밍 공격 방어), 없거나 틀리면 401. |
 | `AGENT_RATE_LIMIT` | `30/minute` | `/agent/stream`·`/agent/resume`의 per-IP 인바운드 rate limit(slowapi 문법, `main.py`의 `limiter`). 키는 X-Forwarded-For 좌측 홉(ingress 뒤 실클라이언트 IP). 초과 시 429. 배경은 ADR 0009. |
 | `AGENT_MAX_MESSAGE_CHARS` | `8000` | 단일 요청 `message`의 최대 문자 수(pydantic `Field(max_length=…)`). 초과 시 422(oversized-payload 가드, ADR 0009). |
+| `SSUAGENT_LOCAL_RAG` | `false` (off) | **opt-in** 로컬 학칙 RAG 도구. `1`/`true`/`yes`(대소문자 무관)면 academic 에이전트에 `search_local_academic_rag`(LlamaIndex, 번들 fixture 코퍼스) 보조 검색 도구가 추가된다(`ssu_agent/rag/tool.py`). 의미 있는 검색엔 `OPENAI_API_KEY` 필요 — 없으면 MockEmbedding(랜덤 벡터)으로 데모 전용. 기본 off: 공식·권위 근거는 ssuMCP 서버측 RAG(`search_academic_policy_sources`)가 담당하므로 답변 소스 이원화를 피한다(ADR 0008). |
 | LLM 키 | — | `GROQ_API_KEY`/`GOOGLE_API_KEY`/`OPENROUTER_API_KEY` 중 설정된 것만 폴백 시퀀스에 포함(위 Architecture 참조). |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini 프로바이더가 사용할 모델명(`llm_factory.py`, `GOOGLE_API_KEY` 설정 시에만 사용). |
 

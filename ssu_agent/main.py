@@ -302,7 +302,6 @@ async def stream_agent(request: Request, req: AgentRequest):
         "messages": [{"role": "user", "content": req.message}],
         "mcp_session_id": req.mcp_session_id,
         "active_agent": None,
-        "pending_action": None,
     }
     config = {"configurable": {"thread_id": thread_id}}
 

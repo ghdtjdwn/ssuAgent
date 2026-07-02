@@ -34,7 +34,6 @@ def _state_with_marker(query: str, marker: str) -> SsuAgentState:
         ],
         "mcp_session_id": "eval-session",
         "active_agent": None,
-        "pending_action": None,
     }
 
 
@@ -47,7 +46,6 @@ def _state_direct_answer(query: str, answer: str) -> SsuAgentState:
         ],
         "mcp_session_id": None,
         "active_agent": None,
-        "pending_action": None,
     }
 
 
@@ -133,7 +131,6 @@ def test_eval_unknown_marker_goes_to_end() -> None:
         ],
         "mcp_session_id": None,
         "active_agent": None,
-        "pending_action": None,
     }
     cmd = _post_supervisor(state)
     assert cmd.goto is END
@@ -152,7 +149,6 @@ def test_eval_marker_survives_surrounding_text() -> None:
         ],
         "mcp_session_id": None,
         "active_agent": None,
-        "pending_action": None,
     }
     cmd = _post_supervisor(state)
     assert cmd.goto == "library_agent"
