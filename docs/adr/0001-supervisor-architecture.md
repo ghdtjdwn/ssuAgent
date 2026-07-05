@@ -57,18 +57,22 @@ router (_has_pending_action)  ← 순수 함수, interrupt 없음
     └─ actionId 발견 → check_approval_node
     └─ 없음 → done_node
 check_approval_node  ← 여기서만 interrupt() 호출
-    └─ interrupt() 호출 → LangGraph가 SQLite에 체크포인트 저장 후 실행 일시정지
-    └─ FastAPI astream_events → on_interrupt 이벤트 → SSE {type:"interrupt"} 전송
+    └─ interrupt() 호출 → LangGraph가 체크포인트(prod=Postgres) 저장 후 실행 일시정지
+    └─ FastAPI astream_events → on_chain_stream 청크의 __interrupt__ 감지 → SSE {type:"interrupt"} 전송
+       (⚠️ on_interrupt 이벤트가 아님 — 아래 "실제 동작" 정정 참조)
     └─ 클라이언트가 POST /agent/resume 전송
     └─ 재개 후 승인이면 confirm_action 실행, 거부이면 취소 메시지
 ```
 
-### LangGraph 1.2.4 interrupt() 실제 동작 (검증됨)
+### LangGraph 1.2.4 interrupt() 실제 동작 (2026-07-05 실측 정정 ⚠️)
 - `ainvoke()`: `GraphInterrupt`를 raise하지 않음. 결과 dict에 `__interrupt__` 키로 반환
   ```python
   result = {"messages": [...], "__interrupt__": [Interrupt(value={...}, id="...")]}
   ```
-- `astream_events(version="v2")`: `on_interrupt` 이벤트로 노출됨 → FastAPI SSE 처리 가능
+- `astream_events(version="v2")`: **`on_interrupt` 이벤트를 내지 않는다.** (이 ADR의 이전 판이 "on_interrupt 이벤트로 노출됨(검증됨)"이라 단언했으나 **틀렸다** — 그 미검증 가정 위에 `_stream_graph`가 `elif etype == "on_interrupt"` 죽은 분기를 만들어 **도서관 HITL 승인 카드가 브라우저에 한 번도 안 뜨는 종단 파손**을 낳았다.)
+  - **실측**: 설치된 langgraph 1.2.4로 prod 토폴로지(부모 그래프+임베드 서브그래프+`interrupt()`)를 실행해 이벤트 전수 출력 → 나온 타입은 `on_chain_start/stream/end`뿐. 인터럽트는 **`on_chain_stream` 청크**에 `{"__interrupt__": (Interrupt(value=...),)}`로 실려 나온다.
+  - **처리**: `_stream_graph`가 `on_chain_stream` 청크에서 `__interrupt__`를 감지(`_extract_interrupt`)해 **첫 `Interrupt.value`만** SSE로 포워드(주변 청크의 raw state=`mcp_session_id` 유출 방지). `commit e32079c`, 회귀 테스트 `tests/test_stream_interrupt.py`(실물 langgraph 그래프 구동).
+  - **교훈**: 외부 라이브러리의 이벤트 계약은 "검증됨"이라 적기 전에 **설치된 버전으로 실제 실행해** 확인할 것. mock이 없는 이벤트를 심으면 테스트는 green이면서 prod는 죽는다. 상세 = `ssuMCP/TROUBLESHOOTING.md` 2026-07-05 (1).
 
 ---
 
