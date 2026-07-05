@@ -6,6 +6,8 @@
 
 A LangGraph-based **multi-agent** campus AI agent for Soongsil University that connects to the university's MCP server ([ssuMCP](https://github.com/hoeongj/ssuMCP)). It integrates with the [ssuAI](https://github.com/hoeongj/ssuAI) web chat UI via SSE streaming.
 
+🟢 **Live** — try it in the chat: <https://ssuai.vercel.app/chat> (this agent answers over SSE)
+
 ## Architecture
 
 ```
