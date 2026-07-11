@@ -90,6 +90,17 @@ def _build_library_prompt(mcp_session_id: str | None) -> str:
             "prepare_*, get_my_library_*, get_my_library_seat 등 인증이 필요한 도구 호출 시 "
             "이 값을 mcp_session_id 파라미터로 반드시 포함하세요."
         )
+    else:
+        # No auth session: reservation / personal library tools would only hit
+        # AUTH_REQUIRED, and calling prepare_* here makes weak models emit filler
+        # instead of a useful message. Answer directly with a login nudge.
+        # (The library has its own login, separate from u-SAINT/LMS SmartID SSO.)
+        prompt += (
+            "\n\n[인증 세션 없음] 예약·이석·반납·대출 현황·내 좌석처럼 로그인이 필요한 "
+            "기능은 지금 이용할 수 없습니다. prepare_*·get_my_library_* 도구를 호출하지 말고, "
+            "'좌석 예약·대출 등은 도서관 로그인(연결) 후 이용할 수 있어요'라고 안내만 하세요. "
+            "좌석 현황 조회·도서 검색 같은 공개 도구는 그대로 사용해 답하세요."
+        )
     return prompt
 
 
