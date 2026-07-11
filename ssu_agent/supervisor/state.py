@@ -5,6 +5,7 @@ Design decision (ADR): single shared TypedDict across supervisor + sub-agents.
 - messages: Annotated[list, add_messages] is the merge channel (all agents append here).
 - active_agent: set by supervisor when routing, cleared when sub-agent finishes.
 - mcp_session_id: passed from the FastAPI client, threaded to all private MCP tool calls.
+- library_connected: client-asserted library auth hint for pre-LLM UX short-circuits.
 
 Why a single state rather than per-agent TypedDicts:
   LangGraph subgraphs that share a parent state use channel-level merging via reducers.
@@ -32,6 +33,9 @@ class SsuAgentState(TypedDict):
     # The client passes mcp_session_id on every request so the agent can pass
     # it to private MCP tools (library reservation, SAINT, LMS) as a parameter.
     mcp_session_id: str | None
+    # Client-asserted hint from ssuAI's useLibraryAuth().isConnected. This is
+    # only a best-effort UX signal; ssuMCP AUTH_REQUIRED remains enforcement.
+    library_connected: bool
 
     # ── Routing ───────────────────────────────────────────────────────────────
     # Set by supervisor before routing; cleared by sub-agent on return.

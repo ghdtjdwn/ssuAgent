@@ -72,6 +72,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import AIMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field
@@ -358,6 +359,9 @@ class AgentRequest(BaseModel):
     message: str = Field(max_length=config.AGENT_MAX_MESSAGE_CHARS)
     thread_id: str = ""  # "" → new conversation
     mcp_session_id: str | None = None
+    # Client-asserted library auth hint. Used only for pre-LLM UX gating; ssuMCP
+    # AUTH_REQUIRED remains the real auth boundary.
+    library_connected: bool = False
     # ADR 0011: optional stable per-user subject (e.g. a frontend JWT subject),
     # independent of the rotating mcp_session_id. Absent today from every known
     # caller — see ADR 0011 for the follow-up this unblocks — so it MUST default
@@ -370,6 +374,7 @@ class ResumeRequest(BaseModel):
     approved: bool
     action_id: int | None = None
     mcp_session_id: str | None = None
+    library_connected: bool = False
     principal: str | None = None
 
 
@@ -492,6 +497,7 @@ class _FunctionTagStripper:
 async def _stream_graph(input_data: dict | object, config: dict):
     """Yield SSE strings from graph.astream_events."""
     stripper = _FunctionTagStripper()
+    streamed_message_ids: set[str] = set()
     # Supervisor text is held, not streamed live: when it routes to a sub-agent it
     # tends to also emit a filler narration ("...에이전트에게 전달했습니다") that must
     # NOT reach the user — the sub-agent's answer is the real response. Dropped on a
@@ -513,6 +519,9 @@ async def _stream_graph(input_data: dict | object, config: dict):
                         for item in content
                     )
                 if content:
+                    chunk_id = getattr(chunk, "id", None)
+                    if chunk_id:
+                        streamed_message_ids.add(chunk_id)
                     if "supervisor_llm" in tags:
                         if not supervisor_routed:
                             supervisor_buf += content  # hold; may be routing narration
@@ -542,7 +551,8 @@ async def _stream_graph(input_data: dict | object, config: dict):
                 # langgraph surfaces an interrupt() pause inside a chain-stream
                 # chunk (not via a dedicated event). Forward the HITL payload and
                 # stop; the client shows the approval card and calls /agent/resume.
-                interrupt_data = _extract_interrupt(event.get("data", {}).get("chunk"))
+                chunk = event.get("data", {}).get("chunk")
+                interrupt_data = _extract_interrupt(chunk)
                 if interrupt_data is not None:
                     supervisor_buf = ""  # a HITL pause supersedes any pending narration
                     tail = stripper.flush()
@@ -550,6 +560,27 @@ async def _stream_graph(input_data: dict | object, config: dict):
                         yield _sse({"type": "text", "content": tail})
                     yield _sse({"type": "interrupt", "data": interrupt_data})
                     return  # Pause SSE; client waits for /agent/resume
+                # Code-generated node replies (pre-auth gates, deterministic
+                # fallbacks) do not emit on_chat_model_stream chunks. Stream the
+                # library agent node's new AIMessage content, but skip supervisor
+                # chain chunks and messages already streamed token-by-token.
+                if name == "agent" and "supervisor_llm" not in (event.get("tags") or []):
+                    messages = chunk.get("messages") if isinstance(chunk, dict) else None
+                    if isinstance(messages, list):
+                        for msg in messages:
+                            if not isinstance(msg, AIMessage):
+                                continue
+                            msg_id = getattr(msg, "id", None)
+                            if msg_id and msg_id in streamed_message_ids:
+                                continue
+                            content = msg.content if isinstance(msg.content, str) else ""
+                            if not content or msg.tool_calls:
+                                continue
+                            if msg_id:
+                                streamed_message_ids.add(msg_id)
+                            cleaned = stripper.feed(content)
+                            if cleaned:
+                                yield _sse({"type": "text", "content": cleaned})
 
     except Exception as exc:
         # Do not reflect the exception detail to the client — it can carry
@@ -589,6 +620,7 @@ async def stream_agent(request: Request, req: AgentRequest):
     initial_state = {
         "messages": [{"role": "user", "content": req.message}],
         "mcp_session_id": req.mcp_session_id,
+        "library_connected": req.library_connected,
         "active_agent": None,
     }
     config = {"configurable": {"thread_id": thread_id}}
@@ -620,8 +652,16 @@ async def resume_agent(request: Request, req: ResumeRequest):
         "approved": req.approved,
         "action_id": req.action_id,
         "mcp_session_id": req.mcp_session_id,
+        "library_connected": req.library_connected,
     }
     config = {"configurable": {"thread_id": req.thread_id}}
+    config = await _graph.aupdate_state(
+        config,
+        {
+            "mcp_session_id": req.mcp_session_id,
+            "library_connected": req.library_connected,
+        },
+    )
 
     return StreamingResponse(
         _stream_graph(Command(resume=resume_payload), config),

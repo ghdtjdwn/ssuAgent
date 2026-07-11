@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 
 from ssu_agent import main
+from ssu_agent.agents.library import _LIBRARY_RESERVATION_LOGIN_MESSAGE
 from ssu_agent.supervisor.graph import build_supervisor_graph
 
 
@@ -183,6 +184,7 @@ async def test_real_supervisor_graph_suppresses_handoff_narration(monkeypatch) -
         {
             "messages": [HumanMessage(content="도서관 2층 좌석 예약해줘")],
             "mcp_session_id": None,
+            "library_connected": False,
             "active_agent": None,
         },
         {"configurable": {"thread_id": "real-supervisor-narration"}},
@@ -190,5 +192,5 @@ async def test_real_supervisor_graph_suppresses_handoff_narration(monkeypatch) -
 
     text = "".join(e["content"] for e in out if e["type"] == "text")
     assert "전달했습니다" not in text
-    assert "좌석 예약은 도서관 로그인 후 이용할 수 있어요" in text
+    assert _LIBRARY_RESERVATION_LOGIN_MESSAGE in text
     assert any(e["type"] == "handoff" and e["agent"] == "library" for e in out)
