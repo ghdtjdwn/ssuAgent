@@ -57,6 +57,17 @@ backstop은 계속 ssuMCP의 `AUTH_REQUIRED` 결과와 ssuAgent의 후처리 gua
 - prepare와 confirm 사이에 `mcp_session_id`가 회전해도 resume 요청의 최신 값으로
   confirm을 호출한다.
 
+## 추가 기록: 미로그인 공개 조회 prompt 보강
+
+운영에서 미로그인 사용자의 공개 좌석 현황(빈자리) 질문이 기존 "가능한 범위에서"
+지시 아래 로그인 안내로 빠지는 사례가 관찰됐다. 예약 경로는 위 사전 게이트가 이미
+결정적으로 처리하므로, 이 수정은 코드 로직 변경 없이 미로그인 prompt만 보강했다.
+좌석 현황·도서 검색·시설/학사일정/공지 같은 공개 조회는 반드시 공개 읽기 도구를
+호출해 실제 결과로 답하고, 로그인 안내로 돌리지 말라고 명시했다.
+
+무료 LLM rate limit 또는 provider fallback은 관찰을 혼동할 수 있으므로, 무료 LLM이
+rate-limited되지 않은 상태에서 재검증한다.
+
 ## 거부한 대안
 
 ### `library_connected`를 인증 근거로 사용
