@@ -492,12 +492,18 @@ class _FunctionTagStripper:
 async def _stream_graph(input_data: dict | object, config: dict):
     """Yield SSE strings from graph.astream_events."""
     stripper = _FunctionTagStripper()
+    # Supervisor text is held, not streamed live: when it routes to a sub-agent it
+    # tends to also emit a filler narration ("...에이전트에게 전달했습니다") that must
+    # NOT reach the user — the sub-agent's answer is the real response. Dropped on a
+    # transfer_to_*; flushed only if the supervisor answered directly (no routing).
+    supervisor_buf = ""
     try:
         async for event in _graph.astream_events(input_data, config=config, version="v2"):
             etype = event.get("event", "")
             name = event.get("name", "")
 
             if etype == "on_chat_model_stream":
+                node = event.get("metadata", {}).get("langgraph_node", "")
                 chunk = event["data"]["chunk"]
                 content = chunk.content if hasattr(chunk, "content") else str(chunk)
                 if isinstance(content, list):
@@ -506,12 +512,16 @@ async def _stream_graph(input_data: dict | object, config: dict):
                         for item in content
                     )
                 if content:
-                    cleaned = stripper.feed(content)
-                    if cleaned:
-                        yield _sse({"type": "text", "content": cleaned})
+                    if node == "supervisor":
+                        supervisor_buf += content  # hold; may be routing narration
+                    else:
+                        cleaned = stripper.feed(content)
+                        if cleaned:
+                            yield _sse({"type": "text", "content": cleaned})
 
             elif etype == "on_tool_start":
                 if name.startswith("transfer_to_"):
+                    supervisor_buf = ""  # drop the supervisor's hand-off narration
                     agent = name.replace("transfer_to_", "").replace("_agent", "")
                     yield _sse(
                         {
@@ -531,6 +541,7 @@ async def _stream_graph(input_data: dict | object, config: dict):
                 # stop; the client shows the approval card and calls /agent/resume.
                 interrupt_data = _extract_interrupt(event.get("data", {}).get("chunk"))
                 if interrupt_data is not None:
+                    supervisor_buf = ""  # a HITL pause supersedes any pending narration
                     tail = stripper.flush()
                     if tail:
                         yield _sse({"type": "text", "content": tail})
@@ -552,6 +563,12 @@ async def _stream_graph(input_data: dict | object, config: dict):
         yield _sse({"type": "error", "message": message})
         return
 
+    # Supervisor answered directly (no routing) or summarised after a sub-agent:
+    # flush the held text as the real answer.
+    if supervisor_buf:
+        cleaned = stripper.feed(supervisor_buf)
+        if cleaned:
+            yield _sse({"type": "text", "content": cleaned})
     tail = stripper.flush()
     if tail:
         yield _sse({"type": "text", "content": tail})
