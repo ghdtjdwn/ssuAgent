@@ -430,8 +430,68 @@ def _is_capacity_error(exc: BaseException) -> bool:
     return False
 
 
+_FN_OPEN = "<function"
+_FN_CLOSE = "</function>"
+
+
+class _FunctionTagStripper:
+    """Drop leaked ``<function=name>{...}</function>`` tool-call text from the stream.
+
+    Some free/weaker LLM providers emit a tool call as *plain text* in this format
+    instead of a structured tool call, so it streams straight to the user as visible
+    content. This stateful, streaming-safe filter removes those blocks (and any
+    unterminated ``<function`` tail at end-of-stream) while passing normal text
+    through, holding back just enough to catch a delimiter split across token chunks.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._dropping = False
+
+    def feed(self, text: str) -> str:
+        self._buf += text
+        out: list[str] = []
+        while self._buf:
+            if self._dropping:
+                idx = self._buf.find(_FN_CLOSE)
+                if idx == -1:
+                    # Still inside a tag; keep only a possible partial close delimiter.
+                    if len(self._buf) >= len(_FN_CLOSE):
+                        self._buf = self._buf[-(len(_FN_CLOSE) - 1) :]
+                    break
+                self._buf = self._buf[idx + len(_FN_CLOSE) :]
+                self._dropping = False
+                continue
+            idx = self._buf.find(_FN_OPEN)
+            if idx == -1:
+                # Emit everything except a tail that could start a split "<function".
+                cut = max(0, len(self._buf) - (len(_FN_OPEN) - 1))
+                out.append(self._buf[:cut])
+                self._buf = self._buf[cut:]
+                if self._buf and not any(
+                    _FN_OPEN.startswith(self._buf[i:]) for i in range(len(self._buf))
+                ):
+                    out.append(self._buf)
+                    self._buf = ""
+                break
+            out.append(self._buf[:idx])
+            self._buf = self._buf[idx:]
+            self._dropping = True
+        return "".join(out)
+
+    def flush(self) -> str:
+        # End of stream: a held partial that never became a tag is emitted as-is;
+        # text still inside an unterminated tag is dropped.
+        if self._dropping:
+            self._buf = ""
+            return ""
+        out, self._buf = self._buf, ""
+        return out
+
+
 async def _stream_graph(input_data: dict | object, config: dict):
     """Yield SSE strings from graph.astream_events."""
+    stripper = _FunctionTagStripper()
     try:
         async for event in _graph.astream_events(input_data, config=config, version="v2"):
             etype = event.get("event", "")
@@ -446,7 +506,9 @@ async def _stream_graph(input_data: dict | object, config: dict):
                         for item in content
                     )
                 if content:
-                    yield _sse({"type": "text", "content": content})
+                    cleaned = stripper.feed(content)
+                    if cleaned:
+                        yield _sse({"type": "text", "content": cleaned})
 
             elif etype == "on_tool_start":
                 if name.startswith("transfer_to_"):
@@ -469,6 +531,9 @@ async def _stream_graph(input_data: dict | object, config: dict):
                 # stop; the client shows the approval card and calls /agent/resume.
                 interrupt_data = _extract_interrupt(event.get("data", {}).get("chunk"))
                 if interrupt_data is not None:
+                    tail = stripper.flush()
+                    if tail:
+                        yield _sse({"type": "text", "content": tail})
                     yield _sse({"type": "interrupt", "data": interrupt_data})
                     return  # Pause SSE; client waits for /agent/resume
 
@@ -487,6 +552,9 @@ async def _stream_graph(input_data: dict | object, config: dict):
         yield _sse({"type": "error", "message": message})
         return
 
+    tail = stripper.flush()
+    if tail:
+        yield _sse({"type": "text", "content": tail})
     yield _sse({"type": "done"})
 
 
