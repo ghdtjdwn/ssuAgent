@@ -525,9 +525,7 @@ async def test_check_approval_confirm_called_with_action_id():
     def confirm_action(mcp_session_id: str, action_id: int) -> str:
         """예약 확정"""
         confirm_calls.append({"mcp_session_id": mcp_session_id, "action_id": action_id})
-        return json.dumps(
-            {"status": "OK", "data": "예약 요청을 접수했습니다. intentId=555."}
-        )
+        return json.dumps({"status": "OK", "data": "예약 요청을 접수했습니다. intentId=555."})
 
     graph = build_library_agent(
         [prepare_reserve_library_seat, confirm_action],
@@ -608,8 +606,7 @@ async def test_check_approval_non_executed_result_not_reported_as_complete():
 def test_confirm_result_message_success():
     result = json.dumps({"status": "OK", "data": "예약 요청을 접수했습니다. intentId=1."})
     assert (
-        _confirm_result_message(result)
-        == "예약 확정 완료: 예약 요청을 접수했습니다. intentId=1."
+        _confirm_result_message(result) == "예약 확정 완료: 예약 요청을 접수했습니다. intentId=1."
     )
 
 
