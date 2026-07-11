@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
 from ssu_agent.agents.library import (
+    _LIBRARY_RESERVATION_LOGIN_MESSAGE,
     _extract_action_id,
     build_library_agent,
     inner_react_tools,
@@ -96,6 +97,14 @@ class _MockLibraryLLM(FakeMessagesListChatModel):
         return self
 
 
+class _SpyLibraryLLM(FakeMessagesListChatModel):
+    bind_tools_calls: int = 0
+
+    def bind_tools(self, tools, **kwargs):
+        self.bind_tools_calls += 1
+        return self
+
+
 def _make_library_llm() -> _MockLibraryLLM:
     """Two-step response: tool call → synthesis (matches ReAct loop)."""
     return _MockLibraryLLM(
@@ -134,6 +143,77 @@ def test_library_agent_graph_compiles():
     assert graph.compile() is not None
 
 
+# ── Integration: pre-LLM reservation auth gate ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reservation_without_mcp_session_returns_login_without_llm():
+    from langgraph.checkpoint.memory import MemorySaver
+
+    llm = _SpyLibraryLLM(responses=[AIMessage(content="should not be used")])
+    graph = build_library_agent(LIBRARY_TOOLS, llm=llm).compile(checkpointer=MemorySaver())
+    initial: SsuAgentState = {
+        "messages": [HumanMessage(content="도서관 2층 예약해줘")],
+        "mcp_session_id": None,
+        "library_connected": False,
+        "active_agent": "library",
+    }
+
+    result = await graph.ainvoke(
+        initial,
+        config={"configurable": {"thread_id": "preauth-no-session"}},
+    )
+
+    assert result["messages"][-1].content == _LIBRARY_RESERVATION_LOGIN_MESSAGE
+    assert result["active_agent"] is None
+    assert llm.bind_tools_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_reservation_with_disconnected_library_returns_login_without_llm():
+    from langgraph.checkpoint.memory import MemorySaver
+
+    llm = _SpyLibraryLLM(responses=[AIMessage(content="should not be used")])
+    graph = build_library_agent(LIBRARY_TOOLS, llm=llm).compile(checkpointer=MemorySaver())
+    initial: SsuAgentState = {
+        "messages": [HumanMessage(content="좌석 신청")],
+        "mcp_session_id": "sess-001",
+        "library_connected": False,
+        "active_agent": "library",
+    }
+
+    result = await graph.ainvoke(
+        initial,
+        config={"configurable": {"thread_id": "preauth-disconnected"}},
+    )
+
+    assert result["messages"][-1].content == _LIBRARY_RESERVATION_LOGIN_MESSAGE
+    assert result["active_agent"] is None
+    assert llm.bind_tools_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_non_reservation_without_session_still_invokes_llm():
+    from langgraph.checkpoint.memory import MemorySaver
+
+    llm = _SpyLibraryLLM(responses=[AIMessage(content="도서관은 여러 층으로 구성돼 있어요.")])
+    graph = build_library_agent(LIBRARY_TOOLS, llm=llm).compile(checkpointer=MemorySaver())
+    initial: SsuAgentState = {
+        "messages": [HumanMessage(content="도서관 몇 층에 있어?")],
+        "mcp_session_id": None,
+        "library_connected": False,
+        "active_agent": "library",
+    }
+
+    result = await graph.ainvoke(
+        initial,
+        config={"configurable": {"thread_id": "preauth-readonly"}},
+    )
+
+    assert result["messages"][-1].content == "도서관은 여러 층으로 구성돼 있어요."
+    assert llm.bind_tools_calls == 1
+
+
 # ── Integration: HITL interrupt triggers on prepare result ────────────────────
 
 
@@ -154,6 +234,7 @@ async def test_library_agent_interrupt_on_prepare():
     initial: SsuAgentState = {
         "messages": [HumanMessage(content="B-007 예약해줘")],
         "mcp_session_id": "sess-001",
+        "library_connected": True,
         "active_agent": "library",
     }
     config = {"configurable": {"thread_id": "lib-test-001"}}
@@ -165,6 +246,55 @@ async def test_library_agent_interrupt_on_prepare():
     interrupt_val = result["__interrupt__"][0].value
     assert interrupt_val["type"] == "library_reservation_approval"
     assert interrupt_val["action_id"] == 99
+
+
+@pytest.mark.asyncio
+async def test_library_resume_confirm_uses_fresh_updated_state():
+    """The approval node must read the state updated immediately before resume,
+    not the stale mcp_session_id checkpointed during the original prepare turn."""
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    confirmed_sessions: list[str | None] = []
+
+    @tool
+    def prepare_reserve_library_seat(mcp_session_id: str, seat_id: int) -> str:
+        """예약 준비"""
+        return json.dumps({"status": "OK", "data": {"actionId": 100, "seatLabel": "C-010"}})
+
+    @tool
+    def confirm_action(mcp_session_id: str) -> str:
+        """예약 확정"""
+        confirmed_sessions.append(mcp_session_id)
+        return '{"status": "OK", "message": "예약 완료"}'
+
+    graph = build_library_agent(
+        [prepare_reserve_library_seat, confirm_action],
+        llm=_make_library_llm(),
+    ).compile(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "lib-resume-fresh"}}
+    initial: SsuAgentState = {
+        "messages": [HumanMessage(content="C-010 예약해줘")],
+        "mcp_session_id": "stale-session",
+        "library_connected": True,
+        "active_agent": "library",
+    }
+
+    interrupted = await graph.ainvoke(initial, config=config)
+    assert "__interrupt__" in interrupted
+
+    config = await graph.aupdate_state(
+        config,
+        {"mcp_session_id": "fresh-session", "library_connected": True},
+    )
+    result = await graph.ainvoke(
+        Command(resume={"approved": True, "action_id": 100}),
+        config=config,
+    )
+
+    assert confirmed_sessions == ["fresh-session"]
+    assert result["mcp_session_id"] == "fresh-session"
+    assert result["library_connected"] is True
 
 
 # ── Integration: AUTH_REQUIRED deterministic guard ────────────────────────────
@@ -217,7 +347,8 @@ async def test_library_auth_required_returns_login_message_not_hallucination():
     )
     initial: SsuAgentState = {
         "messages": [HumanMessage(content="도서관 2층 예약해줘")],
-        "mcp_session_id": None,
+        "mcp_session_id": "stale-or-invalid-session",
+        "library_connected": True,
         "active_agent": "library",
     }
     result = await graph.ainvoke(initial, config={"configurable": {"thread_id": "auth-req-1"}})
@@ -237,6 +368,7 @@ async def test_library_empty_final_content_uses_fallback():
     state: SsuAgentState = {
         "messages": [HumanMessage(content="도서관 좌석 알려줘")],
         "mcp_session_id": None,
+        "library_connected": False,
         "active_agent": "library",
     }
 
@@ -254,6 +386,7 @@ async def test_library_non_empty_final_content_is_untouched():
     state: SsuAgentState = {
         "messages": [HumanMessage(content="도서관 좌석 알려줘")],
         "mcp_session_id": None,
+        "library_connected": False,
         "active_agent": "library",
     }
 

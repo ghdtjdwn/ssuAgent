@@ -163,9 +163,11 @@ def test_state_has_required_keys():
     state: SsuAgentState = {
         "messages": [HumanMessage(content="안녕")],
         "mcp_session_id": "test-session",
+        "library_connected": False,
         "active_agent": None,
     }
     assert state["mcp_session_id"] == "test-session"
+    assert state["library_connected"] is False
     assert state["active_agent"] is None
 
 
@@ -216,6 +218,7 @@ async def test_graph_initial_state_has_mcp_session():
         {
             "messages": [HumanMessage(content="안녕")],
             "mcp_session_id": "session-abc",
+            "library_connected": False,
             "active_agent": None,
         },
         config=config,
@@ -256,6 +259,7 @@ async def test_supervisor_labels_new_ai_messages_with_name():
         {
             "messages": [HumanMessage(content="도서관 좌석 예약해줘")],
             "mcp_session_id": None,
+            "library_connected": False,
             "active_agent": None,
         },
         config={"configurable": {"thread_id": "supervisor-name-label"}},
@@ -286,6 +290,7 @@ def test_route_marker_regex():
             ToolMessage(content=f"{_ROUTE_PREFIX}library_agent", tool_call_id="tc-1"),
         ],
         "mcp_session_id": None,
+        "library_connected": False,
         "active_agent": None,
     }
     cmd = _post_supervisor(state)
@@ -303,6 +308,7 @@ def test_no_route_marker_goes_to_end():
             AIMessage(content="오늘 학식은 제육볶음입니다."),
         ],
         "mcp_session_id": None,
+        "library_connected": False,
         "active_agent": None,
     }
     from langgraph.graph import END

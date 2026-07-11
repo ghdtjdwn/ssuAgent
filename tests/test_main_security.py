@@ -112,6 +112,20 @@ def _post_stream(client: TestClient, headers: dict | None = None):
     )
 
 
+class _FakeResumeGraph:
+    def __init__(self):
+        self.update_calls: list[tuple[dict, dict]] = []
+
+    async def aupdate_state(self, config: dict, values: dict):
+        self.update_calls.append((config, values))
+        return {
+            "configurable": {
+                **config["configurable"],
+                "checkpoint_id": "fresh-checkpoint",
+            }
+        }
+
+
 # ── No key configured → gate is a no-op (prod behavior preserved) ───────────────
 
 
@@ -126,6 +140,83 @@ def test_health_open(client: TestClient):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "UP"
+
+
+def test_agent_request_models_default_and_accept_library_connected():
+    assert main.AgentRequest(message="hi").library_connected is False
+    assert main.AgentRequest(message="hi", library_connected=True).library_connected is True
+
+    assert main.ResumeRequest(thread_id="t1", approved=True).library_connected is False
+    assert (
+        main.ResumeRequest(thread_id="t1", approved=True, library_connected=True).library_connected
+        is True
+    )
+
+
+def test_stream_initial_state_includes_library_connected(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+):
+    captured: dict[str, object] = {}
+
+    async def capture_stream_graph(input_data, config):  # noqa: A002 - mirrors prod signature
+        captured["input_data"] = input_data
+        yield 'data: {"type": "done"}\n\n'
+
+    monkeypatch.setattr(main, "_stream_graph", capture_stream_graph)
+
+    resp = client.post(
+        "/agent/stream",
+        json={
+            "message": "도서관 좌석 알려줘",
+            "thread_id": "library-connected-stream",
+            "library_connected": True,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert captured["input_data"]["library_connected"] is True
+
+
+def test_resume_updates_fresh_session_state_before_resume_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+):
+    from langgraph.types import Command
+
+    fake_graph = _FakeResumeGraph()
+    captured: dict[str, object] = {}
+
+    async def capture_stream_graph(input_data, config):  # noqa: A002 - mirrors prod signature
+        captured["input_data"] = input_data
+        captured["config"] = config
+        yield 'data: {"type": "done"}\n\n'
+
+    monkeypatch.setattr(main, "_graph", fake_graph)
+    monkeypatch.setattr(main, "_stream_graph", capture_stream_graph)
+
+    resp = client.post(
+        "/agent/resume",
+        json={
+            "thread_id": "library-resume-fresh-api",
+            "approved": True,
+            "action_id": 100,
+            "mcp_session_id": "fresh-session",
+            "library_connected": True,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert fake_graph.update_calls == [
+        (
+            {"configurable": {"thread_id": "library-resume-fresh-api"}},
+            {"mcp_session_id": "fresh-session", "library_connected": True},
+        )
+    ]
+    assert captured["config"]["configurable"]["checkpoint_id"] == "fresh-checkpoint"
+    assert isinstance(captured["input_data"], Command)
+    assert captured["input_data"].resume["mcp_session_id"] == "fresh-session"
+    assert captured["input_data"].resume["library_connected"] is True
 
 
 # ── Thread ownership binding ──────────────────────────────────────────────────
