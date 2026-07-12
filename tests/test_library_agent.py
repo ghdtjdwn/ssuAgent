@@ -322,6 +322,47 @@ async def test_library_agent_interrupt_on_prepare():
 
 
 @pytest.mark.asyncio
+async def test_library_agent_interrupt_message_is_humanized_without_changing_tool_message():
+    from langgraph.checkpoint.memory import MemorySaver
+
+    prepare_message = (
+        "오픈열람실(2F) 4번 좌석(좌석ID 929) 예약을 준비했습니다. "
+        "사용자가 승인하면 confirm_action을 호출해 최종 확인하세요."
+    )
+
+    @tool
+    def prepare_reserve_library_seat(mcp_session_id: str, seat_id: int) -> str:
+        """예약 준비"""
+        return json.dumps(
+            {"status": "OK", "data": {"actionId": 929, "message": prepare_message}},
+            ensure_ascii=False,
+        )
+
+    graph = build_library_agent([prepare_reserve_library_seat], llm=_make_library_llm()).compile(
+        checkpointer=MemorySaver()
+    )
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="오픈열람실 좌석 예약해줘")],
+            "mcp_session_id": "sess-929",
+            "library_connected": True,
+            "active_agent": "library",
+        },
+        config={"configurable": {"thread_id": "lib-hitl-human-message"}},
+    )
+
+    interrupt_val = result["__interrupt__"][0].value
+    assert (
+        interrupt_val["details"]["message"]
+        == "오픈열람실(2F) 4번 좌석(좌석ID 929) 예약을 준비했습니다."
+    )
+    assert "confirm_action" not in interrupt_val["details"]["message"]
+
+    tool_contents = [m.content for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert any("confirm_action" in content for content in tool_contents)
+
+
+@pytest.mark.asyncio
 async def test_library_resume_confirm_uses_fresh_updated_state():
     """The approval node must read the state updated immediately before resume,
     not the stale mcp_session_id checkpointed during the original prepare turn."""
@@ -719,6 +760,105 @@ async def test_check_approval_async_accept_polls_until_success(monkeypatch: pyte
         {"mcp_session_id": "sess-777", "intent_id": 777},
         {"mcp_session_id": "sess-777", "intent_id": 777},
     ]
+
+
+@pytest.mark.asyncio
+async def test_check_approval_async_accept_formats_real_prod_success_message():
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    prepare_message = (
+        "오픈열람실(2F) 4번 좌석(좌석ID 929) 예약을 준비했습니다. "
+        "사용자가 승인하면 confirm_action을 호출해 최종 확인하세요."
+    )
+
+    @tool
+    def prepare_reserve_library_seat(mcp_session_id: str, seat_id: int) -> str:
+        """예약 준비"""
+        return json.dumps(
+            {"status": "OK", "data": {"actionId": 929, "message": prepare_message}},
+            ensure_ascii=False,
+        )
+
+    @tool
+    def confirm_action(mcp_session_id: str, action_id: int) -> str:
+        """예약 확정"""
+        return json.dumps({"status": "OK", "data": "예약 요청을 접수했습니다. intentId=2001316."})
+
+    @tool
+    def get_library_wait_status(mcp_session_id: str, intent_id: int) -> str:
+        """대기 현황 조회"""
+        return (
+            "intentId=2001316, status=SUCCEEDED, attempts=1, targetSeatId=929, "
+            "nextAttemptAt=null, expiresAt=null, completedAt=now, outcome=SUCCESS, "
+            "message=오픈열람실(2F) 4 reserved, chargeId=2001316, "
+            "time=2026-07-12 16:32:00~2026-07-12 20:32:00"
+        )
+
+    graph = build_library_agent(
+        [prepare_reserve_library_seat, confirm_action, get_library_wait_status],
+        llm=_make_library_llm(),
+    ).compile(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "confirm-poll-prod-success"}}
+    interrupted = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="오픈열람실 좌석 예약해줘")],
+            "mcp_session_id": "sess-929",
+            "library_connected": True,
+            "active_agent": "library",
+        },
+        config=config,
+    )
+    assert "__interrupt__" in interrupted
+
+    result = await graph.ainvoke(Command(resume={"approved": True}), config=config)
+
+    final = result["messages"][-1].content
+    assert final == "[도서관 에이전트] 예약 완료! 오픈열람실(2F) 4번 좌석 · 이용 시간 16:32~20:32"
+    assert "chargeId" not in final
+
+
+@pytest.mark.asyncio
+async def test_check_approval_async_accept_success_unparseable_status_uses_raw_fallback():
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    unparseable_status = "status=SUCCEEDED totally-unparseable-success-payload"
+
+    @tool
+    def prepare_reserve_library_seat(mcp_session_id: str, seat_id: int) -> str:
+        """예약 준비"""
+        return json.dumps({"status": "OK", "data": {"actionId": 782, "seatLabel": "B-012"}})
+
+    @tool
+    def confirm_action(mcp_session_id: str, action_id: int) -> str:
+        """예약 확정"""
+        return json.dumps({"status": "OK", "data": "예약 요청을 접수했습니다. intentId=782."})
+
+    @tool
+    def get_library_wait_status(mcp_session_id: str, intent_id: int) -> str:
+        """대기 현황 조회"""
+        return unparseable_status
+
+    graph = build_library_agent(
+        [prepare_reserve_library_seat, confirm_action, get_library_wait_status],
+        llm=_make_library_llm(),
+    ).compile(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "confirm-poll-unparseable-success"}}
+    interrupted = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="B-012 예약해줘")],
+            "mcp_session_id": "sess-782",
+            "library_connected": True,
+            "active_agent": "library",
+        },
+        config=config,
+    )
+    assert "__interrupt__" in interrupted
+
+    result = await graph.ainvoke(Command(resume={"approved": True}), config=config)
+
+    assert result["messages"][-1].content == f"[도서관 에이전트] 예약 완료: {unparseable_status}"
 
 
 @pytest.mark.asyncio
