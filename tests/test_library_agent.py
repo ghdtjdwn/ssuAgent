@@ -654,6 +654,217 @@ async def test_check_approval_confirm_called_with_action_id():
 
 
 @pytest.mark.asyncio
+async def test_check_approval_async_accept_polls_until_success(monkeypatch: pytest.MonkeyPatch):
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    async def no_sleep(delay: float) -> None:  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("ssu_agent.agents.library.asyncio.sleep", no_sleep)
+    wait_calls: list[dict] = []
+    wait_responses = [
+        "intentId=777, status=RESERVING, attempts=1, targetSeatId=B-007, "
+        "nextAttemptAt=null, expiresAt=null, completedAt=null, outcome=null, "
+        "message=null. Next action: use get_library_wait_status to poll.",
+        "intentId=777, status=SUCCEEDED, attempts=2, targetSeatId=B-007, "
+        "nextAttemptAt=null, expiresAt=null, completedAt=now, outcome=SUCCESS, "
+        "message=B-007 좌석 예약이 완료되었습니다. "
+        "Next action: use get_library_wait_status to poll.",
+    ]
+
+    @tool
+    def prepare_reserve_library_seat(mcp_session_id: str, seat_id: int) -> str:
+        """예약 준비"""
+        return json.dumps({"status": "OK", "data": {"actionId": 777, "seatLabel": "B-007"}})
+
+    @tool
+    def confirm_action(mcp_session_id: str, action_id: int) -> str:
+        """예약 확정"""
+        return json.dumps({"status": "OK", "data": "예약 요청을 접수했습니다. intentId=777."})
+
+    @tool
+    def get_library_wait_status(mcp_session_id: str, intent_id: int) -> str:
+        """대기 현황 조회"""
+        wait_calls.append({"mcp_session_id": mcp_session_id, "intent_id": intent_id})
+        return wait_responses.pop(0)
+
+    graph = build_library_agent(
+        [prepare_reserve_library_seat, confirm_action, get_library_wait_status],
+        llm=_make_library_llm(),
+    ).compile(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "confirm-poll-success"}}
+    interrupted = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="B-007 예약해줘")],
+            "mcp_session_id": "sess-777",
+            "library_connected": True,
+            "active_agent": "library",
+        },
+        config=config,
+    )
+    assert "__interrupt__" in interrupted
+
+    result = await graph.ainvoke(Command(resume={"approved": True}), config=config)
+
+    final = result["messages"][-1].content
+    assert "예약 완료" in final
+    assert "B-007 좌석 예약이 완료되었습니다" in final
+    assert wait_calls == [
+        {"mcp_session_id": "sess-777", "intent_id": 777},
+        {"mcp_session_id": "sess-777", "intent_id": 777},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_check_approval_async_accept_polls_terminal_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    async def no_sleep(delay: float) -> None:  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("ssu_agent.agents.library.asyncio.sleep", no_sleep)
+
+    @tool
+    def prepare_reserve_library_seat(mcp_session_id: str, seat_id: int) -> str:
+        """예약 준비"""
+        return json.dumps({"status": "OK", "data": {"actionId": 778, "seatLabel": "B-008"}})
+
+    @tool
+    def confirm_action(mcp_session_id: str, action_id: int) -> str:
+        """예약 확정"""
+        return json.dumps({"status": "OK", "data": "예약 요청을 접수했습니다. intentId=778."})
+
+    @tool
+    def get_library_wait_status(mcp_session_id: str, intent_id: int) -> str:
+        """대기 현황 조회"""
+        return (
+            "intentId=778, status=FAILED_UPSTREAM, attempts=1, targetSeatId=B-008, "
+            "nextAttemptAt=null, expiresAt=null, completedAt=now, outcome=FAILED_UPSTREAM, "
+            "message=도서관 서버 응답 오류로 예약하지 못했습니다. "
+            "Next action: use get_library_wait_status to poll."
+        )
+
+    graph = build_library_agent(
+        [prepare_reserve_library_seat, confirm_action, get_library_wait_status],
+        llm=_make_library_llm(),
+    ).compile(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "confirm-poll-failed"}}
+    interrupted = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="B-008 예약해줘")],
+            "mcp_session_id": "sess-778",
+            "library_connected": True,
+            "active_agent": "library",
+        },
+        config=config,
+    )
+    assert "__interrupt__" in interrupted
+
+    result = await graph.ainvoke(Command(resume={"approved": True}), config=config)
+
+    final = result["messages"][-1].content
+    assert "예약 실패" in final
+    assert "도서관 서버 응답 오류" in final
+
+
+@pytest.mark.asyncio
+async def test_check_approval_async_accept_nonterminal_appends_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    async def no_sleep(delay: float) -> None:  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("ssu_agent.agents.library.asyncio.sleep", no_sleep)
+
+    @tool
+    def prepare_reserve_library_seat(mcp_session_id: str, seat_id: int) -> str:
+        """예약 준비"""
+        return json.dumps({"status": "OK", "data": {"actionId": 779, "seatLabel": "B-009"}})
+
+    @tool
+    def confirm_action(mcp_session_id: str, action_id: int) -> str:
+        """예약 확정"""
+        return json.dumps({"status": "OK", "data": "예약 요청을 접수했습니다. intentId=779."})
+
+    @tool
+    def get_library_wait_status(mcp_session_id: str, intent_id: int) -> str:
+        """대기 현황 조회"""
+        return (
+            "intentId=779, status=RESERVING, attempts=1, targetSeatId=B-009, "
+            "nextAttemptAt=null, expiresAt=null, completedAt=null, outcome=null, "
+            "message=null. Next action: use get_library_wait_status to poll."
+        )
+
+    graph = build_library_agent(
+        [prepare_reserve_library_seat, confirm_action, get_library_wait_status],
+        llm=_make_library_llm(),
+    ).compile(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "confirm-poll-processing"}}
+    interrupted = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="B-009 예약해줘")],
+            "mcp_session_id": "sess-779",
+            "library_connected": True,
+            "active_agent": "library",
+        },
+        config=config,
+    )
+    assert "__interrupt__" in interrupted
+
+    result = await graph.ainvoke(Command(resume={"approved": True}), config=config)
+
+    final = result["messages"][-1].content
+    assert "예약 요청을 접수했습니다. intentId=779." in final
+    assert "아직 처리 중이에요" in final
+
+
+@pytest.mark.asyncio
+async def test_check_approval_async_accept_without_wait_tool_keeps_accept_text():
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    @tool
+    def prepare_reserve_library_seat(mcp_session_id: str, seat_id: int) -> str:
+        """예약 준비"""
+        return json.dumps({"status": "OK", "data": {"actionId": 780, "seatLabel": "B-010"}})
+
+    @tool
+    def confirm_action(mcp_session_id: str, action_id: int) -> str:
+        """예약 확정"""
+        return json.dumps({"status": "OK", "data": "예약 요청을 접수했습니다. intentId=780."})
+
+    graph = build_library_agent(
+        [prepare_reserve_library_seat, confirm_action],
+        llm=_make_library_llm(),
+    ).compile(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "confirm-poll-no-tool"}}
+    interrupted = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="B-010 예약해줘")],
+            "mcp_session_id": "sess-780",
+            "library_connected": True,
+            "active_agent": "library",
+        },
+        config=config,
+    )
+    assert "__interrupt__" in interrupted
+
+    result = await graph.ainvoke(Command(resume={"approved": True}), config=config)
+
+    assert (
+        result["messages"][-1].content
+        == "[도서관 에이전트] 예약 요청을 접수했습니다. intentId=780."
+    )
+
+
+@pytest.mark.asyncio
 async def test_check_approval_non_executed_result_not_reported_as_complete():
     """A backend ambiguity notice (status OK, nothing executed) must not read
     as '예약 확정 완료' — the honest backend text must surface instead."""

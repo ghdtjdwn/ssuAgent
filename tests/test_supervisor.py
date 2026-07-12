@@ -12,7 +12,12 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 
-from ssu_agent.supervisor.graph import build_supervisor_graph, categorise_tools
+from ssu_agent.agents.library import _LIBRARY_RESERVATION_LOGIN_MESSAGE
+from ssu_agent.supervisor.graph import (
+    _deterministic_route,
+    build_supervisor_graph,
+    categorise_tools,
+)
 from ssu_agent.supervisor.state import SsuAgentState
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -190,6 +195,13 @@ def _make_mock_llm() -> _MockLLM:
     )
 
 
+class _RaisingLLM(_MockLLM):
+    """Raises if any graph path invokes the supervisor or sub-agent LLM."""
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ANN001
+        raise AssertionError("LLM should not be invoked for deterministic library route")
+
+
 @pytest.mark.asyncio
 async def test_graph_builds_with_mock_llm():
     """Graph compiles without error using mock tools and MemorySaver."""
@@ -227,6 +239,100 @@ async def test_graph_initial_state_has_mcp_session():
     assert result.get("mcp_session_id") == "session-abc"
 
 
+def test_deterministic_route_exact_library_transcript() -> None:
+    assert (
+        _deterministic_route(
+            {
+                "messages": [HumanMessage(content="도서관 예약 해줘")],
+                "mcp_session_id": None,
+                "library_connected": False,
+                "active_agent": None,
+            }
+        )
+        == "library_agent"
+    )
+    assert (
+        _deterministic_route(
+            {
+                "messages": [
+                    AIMessage(content=_LIBRARY_RESERVATION_LOGIN_MESSAGE),
+                    HumanMessage(content="로그인했어"),
+                ],
+                "mcp_session_id": "sess-1",
+                "library_connected": True,
+                "active_agent": None,
+            }
+        )
+        == "library_agent"
+    )
+    assert (
+        _deterministic_route(
+            {
+                "messages": [
+                    AIMessage(content="도서관 예약을 진행할 열람실이나 좌석 선호가 있나요?"),
+                    HumanMessage(content="그냥 아무대나"),
+                ],
+                "mcp_session_id": "sess-1",
+                "library_connected": True,
+                "active_agent": None,
+            }
+        )
+        == "library_agent"
+    )
+
+
+def test_deterministic_route_unrelated_messages_stay_with_supervisor() -> None:
+    assert (
+        _deterministic_route(
+            {
+                "messages": [HumanMessage(content="졸업까지 뭐 남았어?")],
+                "mcp_session_id": None,
+                "library_connected": False,
+                "active_agent": None,
+            }
+        )
+        is None
+    )
+    assert (
+        _deterministic_route(
+            {
+                "messages": [
+                    AIMessage(content=_LIBRARY_RESERVATION_LOGIN_MESSAGE),
+                    HumanMessage(content="로그인은 했는데 지금은 다른 얘기를 길게 좀 하고 싶어"),
+                ],
+                "mcp_session_id": "sess-1",
+                "library_connected": True,
+                "active_agent": None,
+            }
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_deterministic_library_route_skips_supervisor_llm():
+    """A clear library turn must enter the library subgraph without supervisor LLM use."""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    graph = await build_supervisor_graph(
+        all_tools=[],
+        llm=_RaisingLLM(responses=[AIMessage(content="should not be used")]),
+        checkpointer=MemorySaver(),
+    )
+
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="도서관 예약해줘")],
+            "mcp_session_id": None,
+            "library_connected": False,
+            "active_agent": None,
+        },
+        config={"configurable": {"thread_id": "deterministic-library-no-supervisor"}},
+    )
+
+    assert result["messages"][-1].content == _LIBRARY_RESERVATION_LOGIN_MESSAGE
+
+
 @pytest.mark.asyncio
 async def test_supervisor_labels_new_ai_messages_with_name():
     """Supervisor-produced AI messages are labeled for downstream cleanup."""
@@ -257,7 +363,7 @@ async def test_supervisor_labels_new_ai_messages_with_name():
 
     result = await graph.ainvoke(
         {
-            "messages": [HumanMessage(content="도서관 좌석 예약해줘")],
+            "messages": [HumanMessage(content="자리 잡아줘")],
             "mcp_session_id": None,
             "library_connected": False,
             "active_agent": None,
