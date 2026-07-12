@@ -23,6 +23,7 @@ from ssu_agent.agents.library import (
     _build_library_prompt,
     _confirm_result_message,
     _extract_action_id,
+    _has_pending_action,
     build_library_agent,
     inner_react_tools,
 )
@@ -69,6 +70,44 @@ def test_extract_action_id_from_tool_message():
     assert result is not None
     assert result["action_id"] == 99
     assert result["details"]["seatLabel"] == "B-007"
+
+
+def test_has_pending_action_is_scoped_to_current_turn():
+    stale_prior_turn_state: SsuAgentState = {
+        "messages": [
+            HumanMessage(content="B-005 좌석 예약해줘"),
+            AIMessage(content=""),
+            ToolMessage(
+                content=json.dumps({"status": "OK", "data": {"actionId": 5}}),
+                tool_call_id="tc-1",
+            ),
+            AIMessage(content="확인할게요."),
+            HumanMessage(content="좌석 현황 알려줘"),
+            ToolMessage(
+                content=json.dumps({"status": "OK", "data": {"floors": []}}),
+                tool_call_id="tc-2",
+            ),
+        ],
+        "mcp_session_id": "sess-1",
+        "library_connected": True,
+        "active_agent": "library",
+    }
+    assert _has_pending_action(stale_prior_turn_state) == "done"
+
+    current_turn_state: SsuAgentState = {
+        "messages": [
+            HumanMessage(content="B-005 좌석 예약해줘"),
+            AIMessage(content=""),
+            ToolMessage(
+                content=json.dumps({"status": "OK", "data": {"actionId": 5}}),
+                tool_call_id="tc-1",
+            ),
+        ],
+        "mcp_session_id": "sess-1",
+        "library_connected": True,
+        "active_agent": "library",
+    }
+    assert _has_pending_action(current_turn_state) == "check_approval"
 
 
 def test_extract_action_id_returns_none_when_no_action():
