@@ -114,6 +114,15 @@ def _transfer(agent: str) -> dict:
     }
 
 
+def _chain_start(node: str) -> dict:
+    return {
+        "event": "on_chain_start",
+        "name": node,
+        "metadata": {},
+        "data": {},
+    }
+
+
 async def _collect(
     input_data: dict | object | None = None,
     config: dict | None = None,
@@ -132,6 +141,7 @@ async def test_supervisor_handoff_narration_is_dropped(monkeypatch) -> None:
             tags=["supervisor_llm"],
         ),
         _transfer("library"),
+        _chain_start("library_agent"),
         _model("library_agent", "좌석 예약은 도서관 로그인 후 이용할 수 있어요."),
     ]
     monkeypatch.setattr(main, "_graph", _FakeGraph(events))
@@ -140,7 +150,28 @@ async def test_supervisor_handoff_narration_is_dropped(monkeypatch) -> None:
     text = "".join(e["content"] for e in out if e["type"] == "text")
     assert "전달했습니다" not in text  # supervisor narration suppressed
     assert "로그인 후 이용" in text  # sub-agent's real answer shown
-    assert any(e["type"] == "handoff" for e in out)
+    handoffs = [e for e in out if e["type"] == "handoff"]
+    assert len(handoffs) == 1
+    assert handoffs[0]["agent"] == "library"
+
+
+async def test_deterministic_agent_entry_emits_handoff_once(monkeypatch) -> None:
+    events = [
+        _chain_start("library_agent"),
+        _model("library_agent", "좌석 예약은 도서관 로그인 후 이용할 수 있어요."),
+    ]
+    monkeypatch.setattr(main, "_graph", _FakeGraph(events))
+    out = await _collect()
+
+    handoffs = [e for e in out if e["type"] == "handoff"]
+    assert handoffs == [
+        {
+            "type": "handoff",
+            "agent": "library",
+            "status": "routing",
+            "message": "library 에이전트로 전환 중...",
+        }
+    ]
 
 
 async def test_supervisor_direct_answer_is_kept(monkeypatch) -> None:

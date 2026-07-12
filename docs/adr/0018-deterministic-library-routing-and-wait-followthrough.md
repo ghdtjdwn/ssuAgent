@@ -1,0 +1,63 @@
+# ADR 0018 - 도서관 결정적 선라우팅과 예약 대기 상태 후속 확인
+
+| 항목 | 내용 |
+|---|---|
+| 날짜 | 2026-07-12 |
+| 상태 | Accepted |
+| 범위 | `ssu_agent/supervisor/graph.py`, `ssu_agent/main.py`, `ssu_agent/agents/library.py` |
+| 관련 | [ADR 0012](0012-supervisor-narration-suppression.md), [ADR 0013](0013-library-reservation-preauth-gate.md), [ADR 0017](0017-hitl-resume-command-and-tool-pair-sanitizer.md) |
+
+## 배경
+
+운영 대화에서 명백한 도서관 예약 흐름이 여러 차례 일반 답변으로 처리됐다. 사용자는
+도서관 로그인 안내를 받고 로그인 완료를 알렸고, 다시 도서관 예약을 요청했지만 전문
+도서관 경로로 안정적으로 들어가지 않았다. 이후 사용자가 "그냥 아무대나"처럼 짧게
+응답한 시점에야 도서관 경로로 넘어갔다.
+
+또한 좌석 예약 승인 뒤 `confirm_action`은 예약 intent 접수 문구와 `intentId`를 반환했다.
+처리는 수 초 안에 끝나는 경우가 많지만, 응답은 "대기 상태 도구로 확인하라"는 접수
+문구에서 종료되어 사용자가 최종 성공 또는 실패를 한 번 더 물어봐야 했다.
+
+## 결정
+
+그래프 시작점에 보수적인 결정적 선라우터를 둔다. 최신 사용자 메시지에 `도서관`,
+`열람실`, `좌석` 중 하나가 있으면 바로 `library_agent`로 보낸다. 직전 assistant
+메시지가 도서관 로그인/예약 문맥이거나 도서관 예약을 위한 짧은 확인 질문이고, 새 사용자
+메시지가 20자 이하이면 도서관 연속 흐름으로 판단한다. 그 외 모든 입력은 기존 supervisor
+경로를 유지한다.
+
+선라우팅은 도서관에만 적용한다. 현재 관찰된 장애가 도서관 예약 흐름에 한정되어 있고,
+학사/LMS까지 넓히면 잘못된 전문 경로 진입 가능성이 커진다. 도서관 subgraph는 직접
+진입해도 기존처럼 `mcp_session_id`, `library_connected`, `messages`를 읽고 종료 시
+`active_agent`를 정리하므로 별도 routing artifact를 만들지 않는다.
+
+스트리밍은 `transfer_to_*` 도구 이벤트가 없어도 agent node 진입을 감지해 기존과 같은
+handoff SSE를 한 번만 보낸다. 기존 supervisor 경로에서는 같은 플래그로 중복 handoff를
+막는다.
+
+예약 승인 뒤 `confirm_action` 결과에 `intentId`가 있으면 approval node 안에서
+`get_library_wait_status(mcp_session_id, intent_id)`를 최대 3회 확인한다. 각 재시도
+사이에는 1.5초를 기다린다. `SUCCEEDED`는 예약 완료로, `FAILED_RACE`, `FAILED_AUTH`,
+`FAILED_UPSTREAM`, `CANCELLED`, `EXPIRED`는 예약 실패로 사용자에게 최종 결과를 전달한다.
+시간 안에 종단 상태가 나오지 않거나 조회 중 예외가 나면 접수 문구를 유지하고 짧은 처리
+중 안내를 붙인다.
+
+## 대안
+
+프롬프트를 강화하는 방법은 거부했다. 같은 명백한 입력에서도 모델 선택이 흔들린 것이
+장애의 원인이므로 운영 경로를 결정적으로 만들 수 없다.
+
+항상 supervisor를 먼저 호출하고 실패 시 재시도하는 방법도 거부했다. 비용과 지연이
+늘어나고, 재시도 역시 같은 비결정성을 공유한다.
+
+예약 승인 뒤 별도 백그라운드 작업으로 상태를 확인하는 방법은 이번 범위에서 제외했다.
+기존 approval node의 SSE 경로를 그대로 쓰면 사용자에게 최종 문구가 자연스럽게 흐르고,
+실패 시에도 현재 접수 문구로 열려 있게 처리할 수 있다.
+
+## 결과
+
+- 명백한 도서관 키워드와 짧은 도서관 예약 연속 응답은 supervisor 호출 없이 도서관
+  subgraph로 진입한다.
+- 결정적 경로와 기존 supervisor 경로 모두 같은 handoff SSE 모양을 유지한다.
+- 예약 intent가 빠르게 종단되면 같은 응답에서 성공 또는 실패를 알려준다.
+- 종단 상태를 확인하지 못하면 현재 접수 안내를 보존하므로 승인 스트림이 깨지지 않는다.

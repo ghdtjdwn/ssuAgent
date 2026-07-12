@@ -44,6 +44,7 @@ Why manual bind_tools loop instead of create_react_agent:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -261,6 +262,21 @@ _CONFIRM_ASYNC_ACCEPT_MARKERS = (
     "접수했습니다",
     "intentId=",
 )
+_WAIT_INTENT_ID_RE = re.compile(r"\bintentId=(\d+)\b")
+_WAIT_STATUS_RE = re.compile(r"\bstatus=([A-Z_]+)\b")
+_WAIT_OUTCOME_RE = re.compile(r"\boutcome=([^,]+), message=")
+_WAIT_MESSAGE_RE = re.compile(r"\bmessage=(.*?)(?:\. Next action:|$)", re.DOTALL)
+_WAIT_SUCCESS_STATUSES = {"SUCCEEDED"}
+_WAIT_TERMINAL_FAILURE_STATUSES = {
+    "FAILED_RACE",
+    "FAILED_AUTH",
+    "FAILED_UPSTREAM",
+    "CANCELLED",
+    "EXPIRED",
+}
+_WAIT_STILL_PROCESSING_GUIDANCE = (
+    "아직 처리 중이에요 — 잠시 후 대기 상태를 물어보시면 결과를 알려드릴게요."
+)
 
 
 def _confirm_result_message(raw_result: object) -> str:
@@ -309,6 +325,59 @@ def _confirm_result_message(raw_result: object) -> str:
     return f"예약 확정 완료: {text}"
 
 
+def _extract_wait_detail(text: str) -> str:
+    message_match = _WAIT_MESSAGE_RE.search(text)
+    if message_match:
+        message = message_match.group(1).strip()
+        if message and message.lower() != "null":
+            return message
+
+    outcome_match = _WAIT_OUTCOME_RE.search(text)
+    if outcome_match:
+        outcome = outcome_match.group(1).strip()
+        if outcome and outcome.lower() != "null":
+            return outcome
+
+    return text.strip()
+
+
+async def _follow_reservation_wait_status(
+    accept_message: str,
+    raw_confirm_result: object,
+    wait_status_tool: BaseTool | None,
+    mcp_session_id: str | None,
+) -> str:
+    raw_confirm_text = tool_result_to_text(raw_confirm_result)
+    intent_match = _WAIT_INTENT_ID_RE.search(raw_confirm_text)
+    if intent_match is None or wait_status_tool is None:
+        return accept_message
+
+    intent_id = int(intent_match.group(1))
+    try:
+        for attempt in range(3):
+            wait_result = await wait_status_tool.ainvoke(
+                {"mcp_session_id": mcp_session_id, "intent_id": intent_id}
+            )
+            wait_text = tool_result_to_text(wait_result)
+            status_match = _WAIT_STATUS_RE.search(wait_text)
+            status = status_match.group(1) if status_match else None
+            detail = _extract_wait_detail(wait_text)
+
+            if status in _WAIT_SUCCESS_STATUSES:
+                return f"예약 완료: {detail}"
+            if status in _WAIT_TERMINAL_FAILURE_STATUSES or (
+                status is not None and status.startswith("FAILED")
+            ):
+                return f"예약 실패: {detail}"
+
+            if attempt < 2:
+                await asyncio.sleep(1.5)
+    except Exception:
+        logger.exception("library wait-status follow-through failed")
+
+    return f"{accept_message}\n{_WAIT_STILL_PROCESSING_GUIDANCE}"
+
+
 def build_library_agent(
     library_tools: list[BaseTool],
     llm: BaseChatModel | None = None,
@@ -325,6 +394,9 @@ def build_library_agent(
     agent_tools = inner_react_tools(library_tools)
     confirm_tool: BaseTool | None = next(
         (t for t in library_tools if t.name == "confirm_action"), None
+    )
+    wait_status_tool: BaseTool | None = next(
+        (t for t in library_tools if t.name == "get_library_wait_status"), None
     )
 
     # ── Nodes ─────────────────────────────────────────────────────────────────
@@ -458,7 +530,14 @@ def build_library_agent(
             result = await confirm_tool.ainvoke(
                 {"mcp_session_id": mcp_session_id, "action_id": action["action_id"]}
             )
-            msg = AIMessage(content=f"[도서관 에이전트] {_confirm_result_message(result)}")
+            confirm_message = _confirm_result_message(result)
+            final_message = await _follow_reservation_wait_status(
+                confirm_message,
+                result,
+                wait_status_tool,
+                mcp_session_id,
+            )
+            msg = AIMessage(content=f"[도서관 에이전트] {final_message}")
         else:
             msg = AIMessage(content="[도서관 에이전트] 예약이 취소되었습니다.")
 

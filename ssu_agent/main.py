@@ -176,6 +176,17 @@ _TOOL_LABELS: dict[str, str] = {
     "logout_all": "전체 로그아웃 중...",
 }
 
+_AGENT_NODE_NAMES = {"library_agent", "academic_agent", "lms_agent"}
+
+
+def _handoff_payload(agent: str) -> dict[str, str]:
+    return {
+        "type": "handoff",
+        "agent": agent,
+        "status": "routing",
+        "message": f"{agent} 에이전트로 전환 중...",
+    }
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
@@ -525,6 +536,7 @@ async def _stream_graph(input_data: dict | object, config: dict):
     # transfer_to_*; flushed only if the supervisor answered directly (no routing).
     supervisor_buf = ""
     supervisor_routed = False
+    handoff_emitted = False
     try:
         async for event in _graph.astream_events(input_data, config=config, version="v2"):
             etype = event.get("event", "")
@@ -558,19 +570,21 @@ async def _stream_graph(input_data: dict | object, config: dict):
                         if cleaned:
                             yield _sse({"type": "text", "content": cleaned})
 
+            elif etype == "on_chain_start":
+                if name in _AGENT_NODE_NAMES and not handoff_emitted:
+                    supervisor_routed = True
+                    supervisor_buf = ""
+                    handoff_emitted = True
+                    yield _sse(_handoff_payload(name.replace("_agent", "")))
+
             elif etype == "on_tool_start":
                 if name.startswith("transfer_to_"):
                     supervisor_routed = True
                     supervisor_buf = ""  # drop the supervisor's hand-off narration
                     agent = name.replace("transfer_to_", "").replace("_agent", "")
-                    yield _sse(
-                        {
-                            "type": "handoff",
-                            "agent": agent,
-                            "status": "routing",
-                            "message": f"{agent} 에이전트로 전환 중...",
-                        }
-                    )
+                    if not handoff_emitted:
+                        handoff_emitted = True
+                        yield _sse(_handoff_payload(agent))
                 else:
                     label = _TOOL_LABELS.get(name, name)
                     yield _sse({"type": "tool", "name": name, "label": label})

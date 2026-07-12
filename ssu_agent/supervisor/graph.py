@@ -56,7 +56,7 @@ import logging
 import re
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 from langgraph.graph import END, START, StateGraph
@@ -186,6 +186,20 @@ def _make_routing_tools() -> list[BaseTool]:
 
 
 _ROUTE_RE = re.compile(r"ROUTE_TO:(\w+)")
+_LIBRARY_ROUTE_KEYWORDS = ("도서관", "열람실", "좌석")
+_LIBRARY_CONTINUATION_MAX_CHARS = 20
+_LIBRARY_CLARIFICATION_CUES = (
+    "어디",
+    "어느",
+    "몇층",
+    "몇 층",
+    "열람실",
+    "좌석",
+    "자리",
+    "선호",
+    "원하",
+    "괜찮",
+)
 
 _SUPERVISOR_PROMPT = """당신은 숭실대학교 AI 어시스턴트입니다.
 
@@ -215,6 +229,69 @@ get_my_lms_courses → get_my_lms_materials → prepare_lms_material_export
 
 
 # ── Post-supervisor routing node ──────────────────────────────────────────────
+
+
+def _message_content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return " ".join(parts)
+    return ""
+
+
+def _latest_human_message_text(messages: list) -> str:
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            return _message_content_text(msg.content)
+        if isinstance(msg, dict) and msg.get("role") in {"user", "human"}:
+            return _message_content_text(msg.get("content"))
+    return ""
+
+
+def _last_ai_message_text(messages: list) -> str:
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            return _message_content_text(msg.content)
+        if isinstance(msg, dict) and msg.get("role") in {"assistant", "ai"}:
+            return _message_content_text(msg.get("content"))
+    return ""
+
+
+def _is_library_reservation_clarification(text: str) -> bool:
+    return ("?" in text or "까요" in text or "세요" in text) and any(
+        cue in text for cue in _LIBRARY_CLARIFICATION_CUES
+    )
+
+
+def _deterministic_route(state: SsuAgentState) -> str | None:
+    """Conservatively pre-route obvious library turns before the LLM supervisor."""
+    messages = state.get("messages", [])
+    user_text = _latest_human_message_text(messages).strip()
+    if not user_text:
+        return None
+
+    if any(keyword in user_text for keyword in _LIBRARY_ROUTE_KEYWORDS):
+        return "library_agent"
+
+    ai_text = _last_ai_message_text(messages)
+    if (
+        len(user_text) <= _LIBRARY_CONTINUATION_MAX_CHARS
+        and "도서관" in ai_text
+        and (
+            "로그인" in ai_text
+            or "예약" in ai_text
+            or _is_library_reservation_clarification(ai_text)
+        )
+    ):
+        return "library_agent"
+
+    return None
 
 
 def _post_supervisor(state: SsuAgentState) -> Command:
@@ -323,7 +400,14 @@ async def build_supervisor_graph(
     builder.add_node("academic_agent", academic_subgraph)
     builder.add_node("lms_agent", lms_subgraph)
 
-    builder.add_edge(START, "supervisor")
+    def route_from_start(state: SsuAgentState) -> str:
+        return _deterministic_route(state) or "supervisor"
+
+    builder.add_conditional_edges(
+        START,
+        route_from_start,
+        {"library_agent": "library_agent", "supervisor": "supervisor"},
+    )
     builder.add_edge("supervisor", "post_supervisor")
 
     # post_supervisor returns Command(goto=target|END) — LangGraph handles routing
