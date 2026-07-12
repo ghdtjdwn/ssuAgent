@@ -177,7 +177,10 @@ def _pending_action_id(value: object) -> int | None:
 
 
 def _extract_action_id(messages: list) -> dict | None:
-    """Scan recent ToolMessages for an actionId from a prepare_* call.
+    """Scan current-turn ToolMessages for an actionId from a prepare_* call.
+
+    The scan stops at the most recent HumanMessage, so a stale pending action
+    from a prior turn cannot reopen the approval gate on an unrelated reply.
 
     Defense in depth: msg.content built by older checkpoints may still carry a
     raw MCP content-block list (see tool_results.tool_result_to_text) rather
@@ -185,7 +188,9 @@ def _extract_action_id(messages: list) -> dict | None:
     Normalize a list through the same helper before parsing so replaying old
     thread history does not silently miss the actionId.
     """
-    for msg in reversed(messages[-10:]):
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            break
         if isinstance(msg, ToolMessage):
             content = msg.content
             if isinstance(content, list):
