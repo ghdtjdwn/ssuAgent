@@ -48,6 +48,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Literal
 
 from langchain_core.language_models import BaseChatModel
@@ -252,6 +253,13 @@ _WAIT_INTENT_ID_RE = re.compile(r"\bintentId=(\d+)\b")
 _WAIT_STATUS_RE = re.compile(r"\bstatus=([A-Z_]+)\b")
 _WAIT_OUTCOME_RE = re.compile(r"\boutcome=([^,]+), message=")
 _WAIT_MESSAGE_RE = re.compile(r"\bmessage=(.*?)(?:\. Next action:|$)", re.DOTALL)
+_WAIT_RESERVED_SEAT_RE = re.compile(r"\bmessage=(?P<place>.+?)\s+(?P<seat>\S+)\s+reserved\b")
+_WAIT_TIME_RE = re.compile(
+    r"\btime=(?P<start>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
+    r"~(?P<end>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
+)
+_PREPARE_SEAT_DESC_RE = re.compile(r"^\s*(?P<seat_desc>.*?\d+번 좌석)")
+_CONFIRM_ACTION_INSTRUCTION_TOKEN = "confirm_action"
 _WAIT_SUCCESS_STATUSES = {"SUCCEEDED"}
 _WAIT_TERMINAL_FAILURE_STATUSES = {
     "FAILED_RACE",
@@ -327,11 +335,110 @@ def _extract_wait_detail(text: str) -> str:
     return text.strip()
 
 
+def _strip_wait_field_fragments(text: str, field_names: set[str]) -> str:
+    parts = text.split(",")
+    if len(parts) == 1:
+        return text.strip()
+
+    filtered = [
+        part.strip()
+        for part in parts
+        if not any(part.strip().startswith(f"{field_name}=") for field_name in field_names)
+    ]
+    if len(filtered) == len(parts):
+        return text.strip()
+    return ", ".join(filtered).strip()
+
+
+def _seat_desc_from_prepare_details(action_details: dict | None) -> str | None:
+    if not isinstance(action_details, dict):
+        return None
+    message = action_details.get("message")
+    if not isinstance(message, str):
+        return None
+    match = _PREPARE_SEAT_DESC_RE.search(message)
+    if match is None:
+        return None
+    seat_desc = match.group("seat_desc").strip()
+    return seat_desc or None
+
+
+def _seat_desc_from_wait_text(wait_text: str) -> str | None:
+    match = _WAIT_RESERVED_SEAT_RE.search(wait_text)
+    if match is None:
+        return None
+    place = match.group("place").strip()
+    seat = match.group("seat").strip()
+    if not place or not seat:
+        return None
+    return f"{place} {seat}번 좌석"
+
+
+def _format_wait_time_range(wait_text: str) -> str | None:
+    match = _WAIT_TIME_RE.search(wait_text)
+    if match is None:
+        return None
+    try:
+        start = datetime.strptime(match.group("start"), "%Y-%m-%d %H:%M:%S")
+        end = datetime.strptime(match.group("end"), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+    if start.date() == end.date():
+        return f"{start:%H:%M}~{end:%H:%M}"
+    return f"{start.month}/{start.day} {start:%H:%M} ~ {end.month}/{end.day} {end:%H:%M}"
+
+
+def _format_successful_wait_message(wait_text: str, action_details: dict | None) -> str | None:
+    seat_desc = _seat_desc_from_prepare_details(action_details) or _seat_desc_from_wait_text(
+        wait_text
+    )
+    time_range = _format_wait_time_range(wait_text)
+    if seat_desc is None or time_range is None:
+        return None
+    return f"예약 완료! {seat_desc} · 이용 시간 {time_range}"
+
+
+def _strip_confirm_action_instruction_for_human(message: str) -> str:
+    instruction_index = message.find(_CONFIRM_ACTION_INSTRUCTION_TOKEN)
+    if instruction_index == -1:
+        return message
+
+    boundary_index = max(
+        message.rfind(".", 0, instruction_index),
+        message.rfind("。", 0, instruction_index),
+        message.rfind("!", 0, instruction_index),
+        message.rfind("?", 0, instruction_index),
+        message.rfind("！", 0, instruction_index),
+        message.rfind("？", 0, instruction_index),
+    )
+    if boundary_index != -1:
+        cleaned = message[: boundary_index + 1].strip()
+    else:
+        cleaned = message[:instruction_index].strip()
+    return cleaned or message
+
+
+def _human_display_action(action: dict) -> dict:
+    display_action = dict(action)
+    details = action.get("details")
+    if not isinstance(details, dict):
+        return display_action
+
+    display_details = dict(details)
+    message = display_details.get("message")
+    if isinstance(message, str):
+        display_details["message"] = _strip_confirm_action_instruction_for_human(message)
+    display_action["details"] = display_details
+    return display_action
+
+
 async def _follow_reservation_wait_status(
     accept_message: str,
     raw_confirm_result: object,
     wait_status_tool: BaseTool | None,
     mcp_session_id: str | None,
+    action_details: dict | None = None,
 ) -> str:
     raw_confirm_text = tool_result_to_text(raw_confirm_result)
     intent_match = _WAIT_INTENT_ID_RE.search(raw_confirm_text)
@@ -350,10 +457,15 @@ async def _follow_reservation_wait_status(
             detail = _extract_wait_detail(wait_text)
 
             if status in _WAIT_SUCCESS_STATUSES:
+                formatted = _format_successful_wait_message(wait_text, action_details)
+                if formatted is not None:
+                    return formatted
+                detail = _strip_wait_field_fragments(detail, {"chargeId"})
                 return f"예약 완료: {detail}"
             if status in _WAIT_TERMINAL_FAILURE_STATUSES or (
                 status is not None and status.startswith("FAILED")
             ):
+                detail = _strip_wait_field_fragments(detail, {"intentId", "status"})
                 return f"예약 실패: {detail}"
 
             if attempt < 2:
@@ -502,7 +614,9 @@ def build_library_agent(
         # on_chain_stream chunk carrying __interrupt__ (NOT an on_interrupt event);
         # main._extract_interrupt forwards the Interrupt value as {"type":"interrupt"} SSE.
         # Client resumes via POST /agent/resume → Command(resume={approved, action_id}).
-        resume = interrupt({"type": "library_reservation_approval", **action})
+        resume = interrupt(
+            {"type": "library_reservation_approval", **_human_display_action(action)}
+        )
         # ────────────────────────────────────────────────────────────────────
 
         if resume.get("approved") and confirm_tool is not None:
@@ -522,6 +636,7 @@ def build_library_agent(
                 result,
                 wait_status_tool,
                 mcp_session_id,
+                action.get("details"),
             )
             msg = AIMessage(content=f"[도서관 에이전트] {final_message}")
         else:
