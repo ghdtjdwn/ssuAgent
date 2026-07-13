@@ -4,7 +4,7 @@ metadata:
   name: ssu-agent
   namespace: argocd
   annotations:
-    argocd-image-updater.argoproj.io/image-list: "agent=ghcr.io/hoeongj/ssuagent"
+    argocd-image-updater.argoproj.io/image-list: "agent=ghcr.io/ghdtjdwn/ssuagent"
     argocd-image-updater.argoproj.io/agent.update-strategy: "newest-build"
     argocd-image-updater.argoproj.io/agent.allow-tags: "regexp:^sha-[0-9a-f]{40}$"
     argocd-image-updater.argoproj.io/agent.helm.image-name: "image.repository"
@@ -15,7 +15,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/hoeongj/ssuAgent.git
+    repoURL: https://github.com/ghdtjdwn/ssuAgent.git
     targetRevision: main
     path: deploy/charts/ssu-agent
     helm:
