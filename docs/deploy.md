@@ -84,6 +84,33 @@ graph TD
 2. **Write-back**: 이미지 업데이트가 확인되면, ssuAgent 레포지토리의 `deploy/charts/ssu-agent/values.yaml` 내 `image.tag` 값을 새 커밋 해시로 자동 커밋 및 푸시(`write-back`)합니다.
 3. **Helm 배포**: ArgoCD가 values.yaml의 변경점을 인식하고 동기화(Sync)를 수행하여 k3s 클러스터에 Rolling Update 배포를 수행합니다.
 
+### 2026-07-15 trust-boundary rollout verification
+
+`498ddb0`의 main CI와 ARM64 image push는 성공했지만 production은 이전
+image에 남아 있었다. Git의 Application manifest는 현재 GitHub owner인
+`ghdtjdwn`을 가리켰지만, cluster에 실행 중인 Application은 이전 owner인
+`hoeongj`의 repository와 GHCR image annotation을 유지했다. 그 결과 Image
+Updater가 매 주기 이미지를 `skipped` 처리했고, ArgoCD의 `Synced/Healthy`는
+원하는 image가 실행 중이라는 증거가 아니었다.
+
+version-controlled `deploy/argocd/application-ssu-agent.yaml`을 다시 적용해
+live drift를 해소했다. Image Updater는 `sha-498ddb0...`를 `values.yaml`에
+write-back했고 ArgoCD가 rolling update를 완료했다. 최종 검증은 다음 순서로
+수행했다.
+
+1. main CI test와 ARM64 image push 성공
+2. Image Updater의 managed image 수와 write-back commit 확인
+3. ArgoCD `Synced/Healthy`와 실제 running image SHA 확인
+4. Deployment `1/1 Ready`, pod restart 0 확인
+5. `/health`와 `/healthz/deep`의 `UP` 확인
+6. direct no-key `/agent/stream`은 401, ssuAI server proxy 경유 invalid body는
+   422 확인
+
+배포 검증 시 Application 상태만 보지 말고 source repository, image-list
+annotation, chart tag, running pod image를 함께 대조한다. live Application drift는
+수동 image 교체나 pod restart 대신 version-controlled manifest 재적용으로
+복구해 GitOps source of truth를 유지한다.
+
 ---
 
 ## k3s 클러스터 수동 설정 사항 (Manual Setup)
