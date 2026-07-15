@@ -23,10 +23,10 @@ MCP session lifecycle (thread_id ↔ mcp_session_id ↔ principal):
   - thread_id: conversation persistence (Postgres checkpoint)
   - mcp_session_id: ssuMCP auth (externally managed by ssuAI login flow,
     ROTATES on every re-login — never a stable per-user key)
-  - principal: OPTIONAL stable per-user subject supplied by the caller (e.g. a
-    frontend JWT subject). ssuAgent does not derive this itself — see ADR 0011
-    for why (ssuMCP's get_auth_status deliberately never returns a student id
-    / principalKey; resolving one would require a cross-repo ssuMCP change).
+  - principal: stable per-user subject supplied only by the authenticated ssuAI
+    server proxy after it verifies the frontend access JWT. ssuAgent does not
+    derive this itself — see ADR 0011. Requests without Authorization retain
+    the session/anonymous compatibility path.
 
   A thread's ownership is claimed/verified by claim_or_verify_thread_owner:
   - principal present -> bound to the (hashed) principal. Stable across
@@ -53,7 +53,7 @@ Streaming optimisation:
   - on_chat_model_stream   → text chunks (user sees typing)
   - on_tool_start          → handoff/tool events (user sees "routing...")
   - on_chain_stream        → HITL payload when a chunk carries __interrupt__
-                             (client shows approval dialog). langgraph 1.2.4 does
+                             (client shows approval dialog). langgraph 1.2.x does
                              NOT emit an on_interrupt event — the interrupt rides
                              inside an on_chain_stream chunk. See _extract_interrupt.
   Other on_chain_* / on_retriever_* chunks are dropped (SSE noise, and raw state
@@ -292,8 +292,9 @@ async def claim_or_verify_thread_owner(
 ) -> None:
     """Bind a new thread to its owner, or verify the current caller against it.
 
-    ADR 0011. `principal` is an optional stable per-user subject (e.g. a future
-    frontend JWT subject) — see the module docstring. Resolution order:
+    ADR 0011. `principal` is a stable per-user subject supplied by the
+    authenticated ssuAI proxy; it remains optional only for the explicit
+    session/anonymous compatibility path. Resolution order:
 
     1. `principal` present -> the thread is owned by hash(principal). This
        survives `mcp_session_id` rotation (re-login): the same principal from a
@@ -386,8 +387,8 @@ class AgentRequest(BaseModel):
     # AUTH_REQUIRED remains the real auth boundary.
     library_connected: bool = False
     # ADR 0011: optional stable per-user subject (e.g. a frontend JWT subject),
-    # independent of the rotating mcp_session_id. Absent today from every known
-    # caller — see ADR 0011 for the follow-up this unblocks — so it MUST default
+    # independent of the rotating mcp_session_id. The ssuAI proxy supplies its
+    # verified subject; direct and legacy callers may omit it, so it MUST default
     # to None and every code path MUST keep working when it is never sent.
     principal: str | None = None
 

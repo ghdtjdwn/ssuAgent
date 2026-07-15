@@ -71,6 +71,9 @@ class _StreamingMessagesListChatModel(BaseChatModel):
 
 
 async def main() -> None:
+    # Avoid deterministic library pre-routing: this probe is specifically for
+    # the production create_agent supervisor node and its stream metadata.
+    query = "이 요청을 담당 에이전트에게 처리해줘"
     llm = _StreamingMessagesListChatModel(
         responses=[
             AIMessage(
@@ -79,7 +82,7 @@ async def main() -> None:
                     {
                         "id": "call-transfer-library",
                         "name": "transfer_to_library_agent",
-                        "args": {"query": "도서관 2층 좌석 예약해줘"},
+                        "args": {"query": query},
                         "type": "tool_call",
                     }
                 ],
@@ -90,7 +93,7 @@ async def main() -> None:
     )
     graph = await build_supervisor_graph(all_tools=[], llm=llm)
     input_data = {
-        "messages": [HumanMessage(content="도서관 2층 좌석 예약해줘")],
+        "messages": [HumanMessage(content=query)],
         "mcp_session_id": None,
         "active_agent": None,
     }

@@ -7,10 +7,12 @@
 | 범위 | `ssu_agent/supervisor/graph.py`, `ssu_agent/main.py`, `ssu_agent/agents/react_loop.py`, 도메인 에이전트 빈 응답 fallback |
 | 관련 | [ADR 0001](0001-supervisor-architecture.md) |
 
+> 2026-07-15 갱신: 수퍼바이저 executor를 `langchain.agents.create_agent`로 교체하면서 내부 모델 노드명은 `agent`에서 `model`로 바뀌었다. 이 ADR이 선택한 `supervisor_llm` tag 기반 식별은 노드명에 의존하지 않으므로 동작 계약은 그대로 유효하다.
+
 ## 배경
 
 수퍼바이저는 부모 그래프의 `supervisor` 노드 안에서 다시
-`create_react_agent(...).ainvoke(...)`를 실행한다. 브라우저로 나가는 SSE는
+`create_agent(...).ainvoke(...)`를 실행한다. 브라우저로 나가는 SSE는
 `graph.astream_events(version="v2")`에서 직접 만들어지므로, 수퍼바이저 내부
 ReAct 그래프의 채팅 모델 스트림도 그대로 관측된다.
 

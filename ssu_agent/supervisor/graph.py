@@ -3,18 +3,18 @@ Supervisor graph — multi-agent router for ssuAgent.
 
 Architecture: Custom StateGraph with routing-marker pattern.
 
-Why NOT create_react_agent with Command-returning tools:
-  LangGraph 1.2.4's create_react_agent does not propagate Command returns from
-  tool functions to the parent graph. This means handoff tools cannot directly
-  transition the state machine. (Verified: inspect.getsource shows no Command
-  handling in the prebuilt agent executor for this version.)
+Why retain marker tools instead of changing the handoff contract:
+  The parent graph already owns domain transitions and persisted state. Keeping
+  routing tools as side-effect-free marker producers lets the explicit
+  post-supervisor node perform that transition without coupling the parent graph
+  to the inner agent executor's Command semantics (ADR 0001).
 
 Why NOT pure conditional-edges on supervisor LLM output:
   Fragile string parsing. Structured output with Pydantic + a routing node is
   cleaner and gives us a single typed decision object.
 
 Chosen pattern — "Route Marker + Post-Router":
-  1. supervisor_react: create_react_agent with public tools (meal, notice,
+  1. supervisor_react: create_agent with public tools (meal, notice,
      campus, auth) + lightweight routing tools that return a "ROUTE_TO:X" marker.
      The marker tools do NO work; they're lightweight signals for step 2.
   2. post_supervisor_node: scans state for routing markers and returns
@@ -55,12 +55,12 @@ from __future__ import annotations
 import logging
 import re
 
+from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import create_react_agent
 from langgraph.types import Command
 
 from ssu_agent.agents.academic import build_academic_agent
@@ -374,11 +374,11 @@ async def build_supervisor_graph(
     supervisor_tools = [*cats["public"], *cats["auth"], *routing_tools]
     llm_seq = [llm] if llm is not None else get_llm_sequence()
     # Build one ReAct agent per provider ONCE. The tools and prompt are static for
-    # the graph's lifetime, so constructing create_react_agent inside the node
+    # the graph's lifetime, so constructing create_agent inside the node
     # re-compiled the identical graph on every request (and again per provider in
     # the fallback loop). Pre-building keeps the same fallback order.
     supervisor_reacts = [
-        create_react_agent(_llm, supervisor_tools, prompt=_SUPERVISOR_PROMPT) for _llm in llm_seq
+        create_agent(_llm, supervisor_tools, system_prompt=_SUPERVISOR_PROMPT) for _llm in llm_seq
     ]
 
     async def supervisor_node(state: SsuAgentState, config: RunnableConfig) -> dict:

@@ -30,14 +30,14 @@ ssuMCP Server (Spring Boot 4)
 
 - **Multi-provider LLM fallback**: `llm_factory.get_llm_sequence()` falls back in the order Groq (llama-3.3-70b, free 14,400 req/day) → Gemini → OpenRouter, removing the single point of failure. Each provider is added to the sequence only when its API key is set — `GROQ_API_KEY` for Groq, `GOOGLE_API_KEY` for Gemini, `OPENROUTER_API_KEY` for OpenRouter. If no key is set at all, `create_llm()` raises an explicit `RuntimeError` (no silent misbehavior). Groq uses `ChatGroq` instead of the generic `ChatOpenAI` wrapper — the generic wrapper serializes assistant content as a list, which makes Groq return 400 on the second tool call.
 - **State persistence**: conversation state is persisted with the LangGraph Postgres checkpointer.
-- **Thread ownership binding**: the `thread_owners` table binds each `thread_id` to the `mcp_session_id` that first created it, so other sessions cannot read or resume the same checkpoint.
+- **Thread ownership binding**: authenticated requests bind each `thread_id` to the SHA-256 hash of the stable principal verified by the ssuAI proxy. The same user retains checkpoints across re-login and devices, while a different principal cannot read or resume them. Existing session-owned threads migrate lazily when the rightful session first supplies a principal.
 - **HITL safeguard**: library write actions only ever run through the two-step flow `prepare_*` → user approval → `confirm_action`.
 
 ### Key components
 
 | Component | File | Role |
 |---|---|---|
-| Supervisor | `supervisor/graph.py` | Classifies the query → routes to a domain via a `ROUTE_TO:X` marker. `create_react_agent` in LangGraph 1.2.4 does not propagate a `Command` returned by a tool up to the parent graph, so the workaround is a pattern where the routing tool returns a marker string and a `post_supervisor` node scans it and emits `Command(goto=X)` (ADR 0001) |
+| Supervisor | `supervisor/graph.py` | Uses LangChain `create_agent` to classify a query and route it with a `ROUTE_TO:X` marker. A routing tool returns the marker, then `post_supervisor` scans it and emits `Command(goto=X)` (ADR 0001). |
 | Domain agents | `agents/{academic,library,lms}.py` | Per-domain MCP tool bundle + manual `bind_tools` fallback loop (removes the single-provider point of failure) |
 | MCP client | `mcp_client.py` | Connects to ssuMCP over Streamable HTTP (MCP 2025-03-26), loads tools dynamically |
 | LLM factory | `llm_factory.py` | `get_llm_sequence()` — Groq → Gemini → OpenRouter priority fallback |
@@ -70,7 +70,7 @@ export SSUMCP_URL=https://ssumcp.duckdns.org/mcp  # optional, this is the defaul
 # Run the FastAPI app (SSE streaming endpoint)
 uv run uvicorn ssu_agent.main:app --host 0.0.0.0 --port 8000
 
-# Call it from another terminal (add -H "X-Agent-Key: <key>" if AGENT_API_KEY is set)
+# Call it locally from another terminal (add -H "X-Agent-Key: <key>" when the gate is enabled)
 curl -N -X POST http://localhost:8000/agent/stream \
   -H "Content-Type: application/json" \
   -d '{"message": "오늘 학식 알려줘"}'   # "What's on the cafeteria menu today?"
@@ -78,12 +78,13 @@ curl -N -X POST http://localhost:8000/agent/stream \
 
 ## Security / configuration
 
-Key runtime environment variables (all optional; defaults preserve the existing prod behavior):
+Code defaults are intended for local development. The production Helm release sets `AGENT_API_KEY_REQUIRED=true` and uses a non-optional Secret.
 
 | Env var | Default | Role |
 |---|---|---|
 | `ALLOWED_ORIGINS` | `*` (allow all) | CORS allow-list. Comma-separated list of origins (parsed in `config.py` → `CORSMiddleware` in `main.py`). A single `*` keeps the previous allow-all behavior. Narrowing it to the actual frontend origins enables CORS protection. |
-| `AGENT_API_KEY` | empty (gate off) | **Opt-in** API key gate for the `/agent/*` endpoints (the `verify_agent_key` dependency in `main.py`). Empty means no-op (existing prod behavior unchanged). When set, every `/agent` request must send a matching `X-Agent-Key` header (compared with `secrets.compare_digest` to defend against timing attacks); a missing or wrong key gets 401. |
+| `AGENT_API_KEY` | empty (local gate off) | `X-Agent-Key` credential for `/agent/*`. It is mandatory in production and must match the ssuAI server proxy. When configured, `secrets.compare_digest` verifies it and a missing or wrong value gets 401. |
+| `AGENT_API_KEY_REQUIRED` | `false` | Refuses startup when `true` and `AGENT_API_KEY` is empty. Production sets this to `true`; only local development permits `false`. |
 | `AGENT_RATE_LIMIT` | `30/minute` | Per-IP inbound rate limit for `/agent/stream` and `/agent/resume` (slowapi syntax, the `limiter` in `main.py`). Keyed by the leftmost X-Forwarded-For hop (the real client IP behind the ingress). Exceeding it returns 429. Background in ADR 0009. |
 | `AGENT_MAX_MESSAGE_CHARS` | `8000` | Maximum character count of a single request `message` (pydantic `Field(max_length=…)`). Exceeding it returns 422 (oversized-payload guard, ADR 0009). |
 | LLM keys | — | Of `GROQ_API_KEY`/`GOOGLE_API_KEY`/`OPENROUTER_API_KEY`, only the ones that are set join the fallback sequence (see Architecture above). |
@@ -91,13 +92,13 @@ Key runtime environment variables (all optional; defaults preserve the existing 
 
 ### Thread ownership binding
 
-`/agent/stream` and `/agent/resume` check the `thread_owners` table before running the graph. A new `thread_id` stores the `mcp_session_id` of the first request as its owner; any subsequent access to the same `thread_id` from a different `mcp_session_id` returns 403. Anonymous threads without an `mcp_session_id` keep a `NULL` owner, allowing the existing no-session flow.
+`/agent/stream` and `/agent/resume` check `thread_owners` before running the graph. The `principal` on an authenticated request is not browser-asserted input: the ssuAI server proxy verifies the access JWT and injects its stable subject. ssuAgent stores `sha256(principal)` rather than the raw value with `owner_kind='principal'`. The same principal can use the thread after session rotation or from another device; a different principal, or a request that omits the principal after promotion, receives 403.
 
-Checkpoints created before this was deployed have no owner row, so the first requester after deployment claims ownership. Since `mcp_session_id` changes on re-login, ssuAI must clear `ssuagent_thread_id` on logout to avoid a self-403. See `docs/adr/0010-agent-thread-ownership-binding.md` (Korean) for the full decision background.
+An older session-owned row (`owner_kind='session'` or legacy `NULL`) is promoted once, when a request matching its stored `mcp_session_id` first presents a verified principal. A legacy checkpoint with no owner row is claimed by the first verified request. Only requests without Authorization retain the session/anonymous fallback. See `docs/adr/0010-agent-thread-ownership-binding.md` and `docs/adr/0011-thread-stable-principal-binding.md` (Korean) for the full contract.
 
 ### `/agent` endpoint authentication
 
-`/agent/*` is protected by an API key gate. ssuAgent enforces an `X-Agent-Key` header matching `AGENT_API_KEY` (`verify_agent_key` in `main.py`, 401 on mismatch), and the ssuAI frontend injects the key in a server-only proxy (`lib/server/agentProxy.ts`) — the browser only calls same-origin `/api/agent/*`, so the key is never exposed to the client. CORS is restricted to the frontend origins via `ALLOWED_ORIGINS`. See `docs/adr/0009-agent-edge-hardening.md` (Korean) for the design background and verification steps.
+Production `/agent/*` is protected by a mandatory API key gate. With `AGENT_API_KEY_REQUIRED=true`, a deployment without a key refuses to start. ssuAgent then requires `X-Agent-Key` to match `AGENT_API_KEY` (`verify_agent_key` in `main.py`, 401 on mismatch). The server-only ssuAI proxy injects the key and forwards only its verified principal. The browser calls same-origin `/api/agent/*`, so it cannot control either trusted value. See `docs/adr/0009-agent-edge-hardening.md` (Korean) for the design and verification evidence.
 
 ## Test
 
@@ -114,4 +115,4 @@ uv run pytest
 | 3 | ssuAI frontend integration (web UI chat, SSE) | ✅ Done |
 | Security hardening | LLM provider key guard, env-based CORS (`ALLOWED_ORIGINS`), `/agent` API key gate (`AGENT_API_KEY`), thread ownership binding | ✅ Done |
 
-> Implementation note: due to a looping issue with `create_react_agent`, the domain agents were switched to a manual `bind_tools` fallback loop (removing the single-provider point of failure). See `docs/adr/` (Korean) for the rationale and alternatives considered.
+> Implementation note: because the legacy `create_react_agent` executor exhibited a looping issue, domain agents retain a manual `bind_tools` fallback loop (removing the single-provider point of failure). The supervisor uses the supported `langchain.agents.create_agent` API. See `docs/adr/` (Korean) for the rationale and alternatives considered.

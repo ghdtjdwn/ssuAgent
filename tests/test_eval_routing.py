@@ -23,10 +23,10 @@ prefix mismatch, or an unregistered transfer tool; this test can.
 from __future__ import annotations
 
 import pytest
+from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END
-from langgraph.prebuilt import create_react_agent
 
 from ssu_agent.supervisor.graph import (
     _ROUTE_PREFIX,
@@ -41,7 +41,7 @@ from ssu_agent.supervisor.state import SsuAgentState
 
 class _FakeRoutingLLM(FakeMessagesListChatModel):
     """Fake supervisor LLM. `bind_tools` is a no-op so the ReAct agent keeps the
-    canned responses; the actual tools are executed by create_react_agent's
+    canned responses; the actual tools are executed by create_agent's
     ToolNode, not by the model."""
 
     def bind_tools(self, tools, **kwargs):
@@ -67,7 +67,7 @@ async def _run_supervisor(responses: list[AIMessage], query: str) -> SsuAgentSta
     """Build the REAL supervisor ReAct agent (same routing tools + prompt the graph
     uses) driven by a fake LLM, run it on `query`, and return the resulting state."""
     llm = _FakeRoutingLLM(responses=responses)
-    react = create_react_agent(llm, _make_routing_tools(), prompt=_SUPERVISOR_PROMPT)
+    react = create_agent(llm, _make_routing_tools(), system_prompt=_SUPERVISOR_PROMPT)
     result = await react.ainvoke({"messages": [HumanMessage(content=query)]})
     # Shape a supervisor state around the produced messages for _post_supervisor.
     return {
@@ -98,7 +98,9 @@ async def test_eval_routing_tool_drives_correct_node(
     """When the LLM calls a transfer tool, the real ReAct + parser chain routes to
     the matching sub-agent node. Fails if the routing tool emits the wrong marker,
     the prefix drifts, or the tool is not registered on the supervisor."""
-    state = await _run_supervisor([_transfer_call(tool_name, query)], query)
+    state = await _run_supervisor(
+        [_transfer_call(tool_name, query), AIMessage(content="라우팅 완료")], query
+    )
 
     # The real routing tool actually executed and produced its marker.
     markers = [

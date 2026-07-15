@@ -4,6 +4,8 @@
 상태: 확정(구현 완료)
 
 > **갱신 (2026-07-02)**: §3·§6·§8이 기술하는 SQLite(`SqliteSaver`) 체크포인터는 이후 [ADR 003](003-postgres-checkpointer.md)에서 `AsyncPostgresSaver`(Postgres)로 대체됐다(현행 코드 `main.py`). 현행 체크포인터는 ADR 003을 참조. 나머지 아키텍처 결정은 그대로 유효하다.
+>
+> **갱신 (2026-07-15)**: 수퍼바이저의 deprecated `langgraph.prebuilt.create_react_agent` 호출을 공식 후속 API인 `langchain.agents.create_agent`로 교체했다. 정적 prompt 인자는 `system_prompt`로 바뀌었지만 Route Marker + Post-Router 계약, provider 폴백 순서, 부모 그래프 전이는 유지된다. §2와 §8의 1.2.4 표기는 최초 결정 당시의 검증 기록이다.
 
 ---
 
@@ -172,7 +174,7 @@ FastAPI 요청마다 최신 `mcp_session_id`를 state에 주입하므로, 동일
 ## 9. 예상 면접 질문
 
 1. **"수퍼바이저 패턴에서 핸드오프를 어떻게 구현했나요? Command를 반환하는 도구를 왜 안 썼나요?"**  
-   → LangGraph 1.2.4의 `create_react_agent`는 도구 반환값을 `Command`로 처리하지 않는다. 라우팅 도구가 `"ROUTE_TO:X"` 마커 문자열을 반환하고, `post_supervisor` 노드가 이를 스캔해 `Command(goto=X)`를 반환하는 패턴을 직접 설계했다.
+   → 최초 구현 당시 LangGraph 1.2.4의 `create_react_agent`는 도구 반환값을 부모 그래프의 전이로 사용할 수 없었다. 현재는 지원되는 `create_agent`로 교체했지만, 부모 그래프가 전이와 상태 소유권을 명시적으로 유지하도록 `"ROUTE_TO:X"` 마커와 `post_supervisor` 패턴을 보존했다.
 
 2. **"HITL을 구현할 때 `interrupt()`를 어디에 놓아야 하는지, 그리고 왜 그 위치여야 하는지 설명해주세요."**  
    → LangGraph는 노드 경계에서 상태를 체크포인트한다. 라우터 함수(conditional edge)는 체크포인트 경계가 아니므로 거기서 `interrupt()`를 호출하면 상태 저장 없이 실패한다. `interrupt()`는 반드시 `add_node`로 등록된 노드 함수 안에서 호출해야 한다.
