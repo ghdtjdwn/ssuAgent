@@ -66,6 +66,132 @@ def test_drop_routing_messages_removes_supervisor_ai_message():
     ]
 
 
+def test_drop_routing_messages_preserves_completed_supervisor_turns():
+    messages = [
+        HumanMessage(content="도서관 5층 빈 자리 있어?"),
+        AIMessage(content="[도서관 에이전트] 도서관 로그인 후 확인할 수 있습니다."),
+        HumanMessage(content="오늘 학식 뭐야?"),
+        AIMessage(
+            content="",
+            name="supervisor",
+            tool_calls=[
+                {
+                    "id": "meal-1",
+                    "name": "get_today_meal",
+                    "args": {},
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(content="오늘 학식: 제육볶음", tool_call_id="meal-1"),
+        AIMessage(content="오늘 학식은 제육볶음입니다.", name="supervisor"),
+        HumanMessage(content="내 졸업요건 알려줘"),
+        AIMessage(
+            content="학사 에이전트에게 전달하겠습니다.",
+            name="supervisor",
+            tool_calls=[
+                {
+                    "id": "route-academic-1",
+                    "name": "transfer_to_academic_agent",
+                    "args": {"query": "내 졸업요건 알려줘"},
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(content="ROUTE_TO:academic_agent", tool_call_id="route-academic-1"),
+        AIMessage(content="학사 에이전트로 전환했습니다.", name="supervisor"),
+    ]
+
+    cleaned = drop_routing_messages(messages)
+
+    assert [getattr(m, "content", "") for m in cleaned] == [
+        "도서관 5층 빈 자리 있어?",
+        "[도서관 에이전트] 도서관 로그인 후 확인할 수 있습니다.",
+        "오늘 학식 뭐야?",
+        "",
+        "오늘 학식: 제육볶음",
+        "오늘 학식은 제육볶음입니다.",
+        "내 졸업요건 알려줘",
+    ]
+
+
+def test_drop_routing_messages_handles_mixed_public_and_transfer_calls():
+    messages = [
+        HumanMessage(content="오늘 학식과 내 졸업요건 알려줘"),
+        AIMessage(
+            content="학식은 조회하고 학사 에이전트로 전환하겠습니다.",
+            name="supervisor",
+            tool_calls=[
+                {
+                    "id": "meal-mixed-1",
+                    "name": "get_today_meal",
+                    "args": {},
+                    "type": "tool_call",
+                },
+                {
+                    "id": "route-mixed-1",
+                    "name": "transfer_to_academic_agent",
+                    "args": {"query": "내 졸업요건 알려줘"},
+                    "type": "tool_call",
+                },
+            ],
+        ),
+        ToolMessage(content="오늘 학식: 제육볶음", tool_call_id="meal-mixed-1"),
+        ToolMessage(content="ROUTE_TO:academic_agent", tool_call_id="route-mixed-1"),
+        AIMessage(content="학사 에이전트로 전환했습니다.", name="supervisor"),
+    ]
+
+    cleaned = drop_routing_messages(messages)
+
+    assert [getattr(m, "content", "") for m in cleaned] == [
+        "오늘 학식과 내 졸업요건 알려줘",
+        "",
+        "오늘 학식: 제육볶음",
+    ]
+    assert isinstance(cleaned[1], AIMessage)
+    assert [tc["name"] for tc in cleaned[1].tool_calls] == ["get_today_meal"]
+
+
+def test_drop_routing_messages_scopes_reused_call_ids_to_their_user_turn():
+    messages = [
+        HumanMessage(content="내 졸업요건 알려줘"),
+        AIMessage(
+            content="",
+            name="supervisor",
+            tool_calls=[
+                {
+                    "id": "reused-call-id",
+                    "name": "transfer_to_academic_agent",
+                    "args": {"query": "내 졸업요건 알려줘"},
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(content="ROUTE_TO:academic_agent", tool_call_id="reused-call-id"),
+        AIMessage(content="[학사 에이전트] 로그인 후 확인할 수 있습니다."),
+        HumanMessage(content="오늘 학식 뭐야?"),
+        AIMessage(
+            content="",
+            name="supervisor",
+            tool_calls=[
+                {
+                    "id": "reused-call-id",
+                    "name": "get_today_meal",
+                    "args": {},
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(content="오늘 학식: 제육볶음", tool_call_id="reused-call-id"),
+        AIMessage(content="오늘 학식은 제육볶음입니다.", name="supervisor"),
+    ]
+
+    cleaned = drop_routing_messages(messages)
+
+    assert "ROUTE_TO:academic_agent" not in [getattr(m, "content", "") for m in cleaned]
+    assert "오늘 학식: 제육볶음" in [getattr(m, "content", "") for m in cleaned]
+
+
 @pytest.mark.asyncio
 async def test_tool_calls_in_a_turn_run_concurrently():
     """Two 0.2s tools in one turn should finish in ~0.2s (parallel), not ~0.4s."""

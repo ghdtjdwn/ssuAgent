@@ -44,7 +44,7 @@ MCP session lifecycle:
 
 Streaming:
   FastAPI calls graph.astream_events(version="v2") and filters:
-  - on_chat_model_stream → text chunks (token-by-token output)
+  - on_chat_model_stream → candidate answer text (routing/pre-tool narration is suppressed)
   - on_tool_start where name starts with "transfer_to_" → handoff status UX
   - on_chain_stream carrying __interrupt__ → HITL payload for library approval
     (langgraph 1.2.4 does not emit an on_interrupt event; see main._extract_interrupt)
@@ -319,8 +319,12 @@ def _deterministic_route(state: SsuAgentState) -> str | None:
 
 
 def _post_supervisor(state: SsuAgentState) -> Command:
-    """Check if the supervisor's last tool result is a routing marker."""
-    for msg in reversed(state["messages"][-8:]):
+    """Check the current user turn for a supervisor routing marker."""
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, HumanMessage) or (
+            isinstance(msg, dict) and msg.get("role") in {"user", "human"}
+        ):
+            break
         content = getattr(msg, "content", "")
         if isinstance(content, str):
             m = _ROUTE_RE.search(content)

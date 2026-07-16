@@ -2,7 +2,7 @@
 
 | 항목 | 내용 |
 |---|---|
-| 날짜 | 2026-07-11 |
+| 날짜 | 2026-07-11 (2026-07-16 갱신) |
 | 상태 | Accepted |
 | 범위 | `ssu_agent/supervisor/graph.py`, `ssu_agent/main.py`, `ssu_agent/agents/react_loop.py`, 도메인 에이전트 빈 응답 fallback |
 | 관련 | [ADR 0001](0001-supervisor-architecture.md) |
@@ -68,8 +68,49 @@ event=on_chat_model_stream name=_StreamingMessagesListChatModel tags=['seq:step:
 그래프 상태에서는 수퍼바이저가 새로 만든 `AIMessage`의 `name`을 `"supervisor"`로
 설정한다. 서브에이전트 앞단의 `drop_routing_messages`는 기존
 `transfer_to_*` tool call 및 `ROUTE_TO:*` ToolMessage 제거에 더해,
-`name == "supervisor"`인 `AIMessage`를 제거한다. 스트리밍 식별에는 runnable tag를
-쓰고, 저장된 대화 정리에는 메시지 name을 쓰는 식으로 두 경로를 분리했다.
+라우팅이 발생한 사용자 턴 안의 `name == "supervisor"` 메시지만 제거한다. 스트리밍
+식별에는 runnable tag를 쓰고, 저장된 대화 정리에는 메시지 name과 사용자 턴 경계를
+함께 쓰는 식으로 두 경로를 분리했다.
+
+## 2026-07-16 후속 장애와 보정
+
+운영 대화에서 `도서관 질문 → 학식 질문 → 졸업요건 질문`을 순서대로 보냈을 때,
+학사 에이전트가 이미 답한 학식 질문까지 두 번째 요청으로 다시 설명했다. 같은
+도서관 응답에는 도구 호출 전 문장인 "5층 현황을 확인해드리겠습니다"가 최종 로그인
+안내 앞에 붙었다.
+
+첫 번째 원인은 `drop_routing_messages`가 전체 체크포인트에서
+`name == "supervisor"`인 메시지를 모두 지운 것이었다. 수퍼바이저는 라우팅 narration뿐
+아니라 직접 처리한 학식 도구 호출과 최종 답변에도 같은 name을 붙인다. 그 답변만
+삭제한 뒤 tool-pair sanitizer가 고아 도구 결과를 제거하면서, 서브에이전트 입력에는
+`오늘 학식 뭐야?`와 `내 졸업요건 알려줘`라는 두 HumanMessage가 답변 없이 연속으로
+남았다.
+
+메시지 정리는 HumanMessage 기준 사용자 턴으로 나눈다. `transfer_to_*` 호출이 있는
+턴에서만 수퍼바이저 메시지와 route tool pair를 제거하고, 이전에 직접 답한 턴은
+도구 호출·결과·최종 답변을 모두 보존한다. 최신 HumanMessage만 넘기는 방식은 같은
+도메인의 자연스러운 후속 질문 문맥까지 없애므로 선택하지 않았다. 한 AIMessage에
+공개 도구와 transfer가 함께 있으면 transfer call만 제거하고 공개 tool pair는
+보존한다. provider가 call id를 재사용해도 다른 사용자 턴의 결과를 지우지 않도록
+route call id 역시 사용자 턴과 함께 식별한다.
+
+수퍼바이저의 post-router도 같은 턴 경계를 적용한다. 과거 8개 메시지를 고정 길이로
+검색하면 이전 턴의 `ROUTE_TO:*`가 남아 새 학식 질문까지 학사 에이전트로 다시 보낼
+수 있다. 역순 검색은 최신 HumanMessage에서 중단해 현재 수퍼바이저 실행이 만든
+marker만 사용한다.
+
+두 번째 원인은 모든 서브에이전트 `on_chat_model_stream` 텍스트를 즉시 SSE로 보낸
+것이었다. 모델이 text와 tool call을 한 AIMessage에 함께 담으면, text는 진행 안내일
+뿐인데도 최종 답변에 합쳐졌다. 서브에이전트 텍스트는 잠시 버퍼링하고 다음 이벤트가
+도구 시작이면 폐기한다. 도구 없이 끝난 최종 답변만 전송한다. 이 때문에 최종 답변은
+모델 호출이 끝난 뒤 전달되지만, handoff와 tool 상태 이벤트는 계속 즉시 표시된다.
+provider fallback에서는 실패한 모델의 부분 출력이 다음 provider 답변과 합쳐지지
+않도록 supervisor와 sub-agent model start/error마다 각 버퍼를 초기화한다.
+
+회귀 테스트는 `test_drop_routing_messages_preserves_completed_supervisor_turns`와
+`test_subagent_tool_preamble_is_dropped`가 각각 체크포인트 문맥과 SSE 출력을 고정한다.
+혼합 tool call, 재사용 call id, 과거 marker, provider fallback 부분 출력도 각각의
+전용 회귀 테스트로 고정한다.
 
 ## 빈 응답 fallback
 

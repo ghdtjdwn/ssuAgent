@@ -173,6 +173,77 @@ async def test_deterministic_agent_entry_emits_handoff_once(monkeypatch) -> None
     ]
 
 
+async def test_subagent_tool_preamble_is_dropped(monkeypatch) -> None:
+    events = [
+        _chain_start("library_agent"),
+        _model("agent", "도서관 5층 현황을 확인해드리겠습니다."),
+        {
+            "event": "on_tool_start",
+            "name": "get_library_seat_status",
+            "tags": [],
+            "metadata": {},
+            "data": {},
+        },
+        _model("agent", "[도서관 에이전트] 도서관 로그인 후 확인할 수 있습니다."),
+    ]
+    monkeypatch.setattr(main, "_graph", _FakeGraph(events))
+
+    out = await _collect()
+
+    text = "".join(e["content"] for e in out if e["type"] == "text")
+    assert "현황을 확인해드리겠습니다" not in text
+    assert text == "[도서관 에이전트] 도서관 로그인 후 확인할 수 있습니다."
+
+
+async def test_failed_provider_partial_text_is_dropped_before_fallback(monkeypatch) -> None:
+    events = [
+        _chain_start("academic_agent"),
+        {"event": "on_chat_model_start", "name": "first", "tags": [], "data": {}},
+        _model("agent", "실패한 provider의 부분 응답"),
+        {"event": "on_chat_model_error", "name": "first", "tags": [], "data": {}},
+        {"event": "on_chat_model_start", "name": "fallback", "tags": [], "data": {}},
+        _model("agent", "[학사 에이전트] 최종 답변"),
+    ]
+    monkeypatch.setattr(main, "_graph", _FakeGraph(events))
+
+    out = await _collect()
+
+    text = "".join(e["content"] for e in out if e["type"] == "text")
+    assert text == "[학사 에이전트] 최종 답변"
+
+
+async def test_failed_supervisor_partial_text_is_dropped_before_fallback(monkeypatch) -> None:
+    supervisor_tags = ["supervisor_llm"]
+    events = [
+        {
+            "event": "on_chat_model_start",
+            "name": "first",
+            "tags": supervisor_tags,
+            "data": {},
+        },
+        _model("model", "실패한 supervisor의 부분 응답", tags=supervisor_tags),
+        {
+            "event": "on_chat_model_error",
+            "name": "first",
+            "tags": supervisor_tags,
+            "data": {},
+        },
+        {
+            "event": "on_chat_model_start",
+            "name": "fallback",
+            "tags": supervisor_tags,
+            "data": {},
+        },
+        _model("model", "최종 supervisor 답변", tags=supervisor_tags),
+    ]
+    monkeypatch.setattr(main, "_graph", _FakeGraph(events))
+
+    out = await _collect()
+
+    text = "".join(e["content"] for e in out if e["type"] == "text")
+    assert text == "최종 supervisor 답변"
+
+
 async def test_supervisor_direct_answer_is_kept(monkeypatch) -> None:
     # No routing: the supervisor's own answer IS the response and must be shown.
     events = [_model("agent", "안녕하세요! 무엇을 도와드릴까요?", tags=["supervisor_llm"])]

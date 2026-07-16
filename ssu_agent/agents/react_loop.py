@@ -20,7 +20,7 @@ import logging
 import time
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 
@@ -61,37 +61,58 @@ async def _run_tool_call(tc: dict, tools: list[BaseTool], config: RunnableConfig
 
 
 def drop_routing_messages(messages: list) -> list:
-    """Remove supervisor routing artifacts and narration from sub-agent context.
+    """Remove routing artifacts without erasing completed supervisor turns.
 
     When the supervisor routes to a sub-agent it leaves an AIMessage with a
     transfer_to_<agent> tool call + a ToolMessage("ROUTE_TO:<agent>") in the
     shared state. Groq llama-3.3-70b sees the trailing ToolMessage and produces a
-    text completion instead of calling the sub-agent's tools. Supervisor
-    narration is also stripped because it can make the sub-agent think the user
-    was already answered. Strip those artifacts so the inner ReAct agent sees a
-    clean user→ conversation.
+    text completion instead of calling the sub-agent's tools. Narration from the
+    same routed user turn must also be stripped because it can make the sub-agent
+    think the request was already answered.
+
+    Do not remove every message named ``supervisor``: those messages also contain
+    completed direct answers such as meal results. Erasing only those answers
+    leaves consecutive HumanMessages in history, so the next domain agent treats
+    an already-answered question as a second pending request.
     """
-    routing_call_ids: set[str] = set()
+    routing_call_ids: set[tuple[int, str]] = set()
+    message_turns: list[int] = []
+    routed_turns: set[int] = set()
+    turn = -1
+
     for msg in messages:
-        if (
-            isinstance(msg, AIMessage)
-            and msg.tool_calls
-            and all(tc.get("name", "").startswith("transfer_to_") for tc in msg.tool_calls)
-        ):
-            for tc in msg.tool_calls:
-                routing_call_ids.add(tc.get("id", ""))
+        if isinstance(msg, HumanMessage):
+            turn += 1
+        message_turns.append(turn)
+        routing_calls = (
+            [tc for tc in msg.tool_calls if tc.get("name", "").startswith("transfer_to_")]
+            if isinstance(msg, AIMessage)
+            else []
+        )
+        if routing_calls:
+            routed_turns.add(turn)
+            for tc in routing_calls:
+                if call_id := tc.get("id"):
+                    routing_call_ids.add((turn, call_id))
 
     result = []
-    for msg in messages:
-        if isinstance(msg, AIMessage) and msg.name == "supervisor":
-            continue
-        if (
-            isinstance(msg, AIMessage)
-            and msg.tool_calls
-            and all(tc.get("name", "").startswith("transfer_to_") for tc in msg.tool_calls)
-        ):
-            continue
-        if isinstance(msg, ToolMessage) and msg.tool_call_id in routing_call_ids:
+    for msg, message_turn in zip(messages, message_turns, strict=True):
+        if isinstance(msg, AIMessage):
+            routing_calls = [
+                tc for tc in msg.tool_calls if tc.get("name", "").startswith("transfer_to_")
+            ]
+            if routing_calls:
+                non_routing_calls = [tc for tc in msg.tool_calls if tc not in routing_calls]
+                if non_routing_calls:
+                    result.append(
+                        msg.model_copy(update={"content": "", "tool_calls": non_routing_calls})
+                    )
+                continue
+            if msg.name == "supervisor" and message_turn in routed_turns:
+                if msg.tool_calls:
+                    result.append(msg.model_copy(update={"content": ""}))
+                continue
+        if isinstance(msg, ToolMessage) and (message_turn, msg.tool_call_id) in routing_call_ids:
             continue
         result.append(msg)
     return result

@@ -151,7 +151,7 @@ FastAPI 요청마다 최신 `mcp_session_id`를 state에 주입하므로, 동일
 
 | LangGraph 이벤트 | SSE 페이로드 | 용도 |
 |---|---|---|
-| `on_chat_model_stream` | `{type:"text", content:"..."}` | 토큰별 LLM 출력 |
+| `on_chat_model_stream` | `{type:"text", content:"..."}` | 후보 LLM 출력. 라우팅·도구 호출 전 narration은 버퍼에서 폐기하고 최종 답변만 전달 |
 | `on_tool_start` (name: `transfer_to_*`) | `{type:"handoff", agent:"library", message:"도서관 에이전트로 전환 중..."}` | 에이전트 전환 UX |
 | `on_tool_start` (other) | `{type:"tool", name:"..."}` | 디버그용 도구 호출 |
 | `on_chain_stream` 청크의 `__interrupt__` | `{type:"interrupt", data:{...}}` | HITL 승인 요청 (⚠️ `on_interrupt` 이벤트 아님 — 위 3절 정정 참조) |

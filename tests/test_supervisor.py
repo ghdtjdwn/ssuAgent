@@ -502,3 +502,28 @@ def test_no_route_marker_goes_to_end():
 
     cmd = _post_supervisor(state)
     assert cmd.goto is END
+
+
+def test_post_supervisor_ignores_route_markers_from_earlier_user_turns():
+    from langchain_core.messages import ToolMessage
+    from langgraph.graph import END
+
+    from ssu_agent.supervisor.graph import _ROUTE_PREFIX, _post_supervisor
+
+    state: SsuAgentState = {
+        "messages": [
+            HumanMessage(content="내 졸업요건 알려줘"),
+            AIMessage(content=""),
+            ToolMessage(content=f"{_ROUTE_PREFIX}academic_agent", tool_call_id="route-old"),
+            AIMessage(content="[학사 에이전트] 로그인 후 확인할 수 있습니다."),
+            HumanMessage(content="오늘 학식 뭐야?"),
+            AIMessage(content="오늘 학식은 제육볶음입니다."),
+        ],
+        "mcp_session_id": None,
+        "library_connected": False,
+        "active_agent": None,
+    }
+
+    cmd = _post_supervisor(state)
+
+    assert cmd.goto is END

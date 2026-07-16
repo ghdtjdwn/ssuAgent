@@ -7,7 +7,7 @@ Endpoints:
   GET  /health         — liveness check
 
 SSE event types emitted:
-  {"type": "text",    "content": "..."}    — LLM token chunk
+  {"type": "text",    "content": "..."}    — final answer text chunk
   {"type": "handoff", "agent": "library"}  — sub-agent routing started
   {"type": "tool",    "name": "..."}       — tool call started (Korean UX label via _TOOL_LABELS)
   {"type": "interrupt","data": {...}}       — HITL payload awaiting user decision
@@ -50,7 +50,8 @@ Checkpointer (Postgres):
 
 Streaming optimisation:
   astream_events(version="v2") yields rich event dicts. We filter:
-  - on_chat_model_stream   → text chunks (user sees typing)
+  - on_chat_model_stream   → candidate answer text; supervisor routing narration
+                             and sub-agent pre-tool narration are buffered/dropped
   - on_tool_start          → handoff/tool events (user sees "routing...")
   - on_chain_stream        → HITL payload when a chunk carries __interrupt__
                              (client shows approval dialog). langgraph 1.2.x does
@@ -548,6 +549,11 @@ async def _stream_graph(input_data: dict | object, config: dict):
     # NOT reach the user — the sub-agent's answer is the real response. Dropped on a
     # transfer_to_*; flushed only if the supervisor answered directly (no routing).
     supervisor_buf = ""
+    # Sub-agent models can emit a user-facing preamble in the same message as a
+    # tool call ("5층 현황을 확인해드리겠습니다."). Buffer their text until the
+    # next event proves whether a tool follows. A tool start drops that preamble;
+    # only the final no-tool answer is flushed at the end of the turn.
+    subagent_buf = ""
     supervisor_routed = False
     handoff_emitted = False
     suppress_chain_start_handoff = _is_resume_stream_input(input_data)
@@ -556,7 +562,13 @@ async def _stream_graph(input_data: dict | object, config: dict):
             etype = event.get("event", "")
             name = event.get("name", "")
 
-            if etype == "on_chat_model_stream":
+            if etype == "on_chat_model_start":
+                if "supervisor_llm" in (event.get("tags") or []):
+                    supervisor_buf = ""
+                else:
+                    subagent_buf = ""
+
+            elif etype == "on_chat_model_stream":
                 tags = event.get("tags") or []
                 chunk = event["data"]["chunk"]
                 content = chunk.content if hasattr(chunk, "content") else str(chunk)
@@ -580,9 +592,13 @@ async def _stream_graph(input_data: dict | object, config: dict):
                         if not supervisor_routed:
                             supervisor_buf += content  # hold; may be routing narration
                     else:
-                        cleaned = stripper.feed(content)
-                        if cleaned:
-                            yield _sse({"type": "text", "content": cleaned})
+                        subagent_buf += content  # hold; may precede a tool call
+
+            elif etype == "on_chat_model_error":
+                if "supervisor_llm" in (event.get("tags") or []):
+                    supervisor_buf = ""
+                else:
+                    subagent_buf = ""
 
             elif etype == "on_chain_start":
                 if (
@@ -604,6 +620,7 @@ async def _stream_graph(input_data: dict | object, config: dict):
                         handoff_emitted = True
                         yield _sse(_handoff_payload(agent))
                 else:
+                    subagent_buf = ""  # drop the sub-agent's pre-tool narration
                     label = _TOOL_LABELS.get(name, name)
                     yield _sse({"type": "tool", "name": name, "label": label})
 
@@ -615,6 +632,7 @@ async def _stream_graph(input_data: dict | object, config: dict):
                 interrupt_data = _extract_interrupt(chunk)
                 if interrupt_data is not None:
                     supervisor_buf = ""  # a HITL pause supersedes any pending narration
+                    subagent_buf = ""
                     tail = stripper.flush()
                     if tail:
                         yield _sse({"type": "text", "content": tail})
@@ -664,6 +682,10 @@ async def _stream_graph(input_data: dict | object, config: dict):
     # Supervisor answered directly (no routing): flush the held text as the real answer.
     if supervisor_buf and not supervisor_routed:
         cleaned = stripper.feed(supervisor_buf)
+        if cleaned:
+            yield _sse({"type": "text", "content": cleaned})
+    if subagent_buf:
+        cleaned = stripper.feed(subagent_buf)
         if cleaned:
             yield _sse({"type": "text", "content": cleaned})
     tail = stripper.flush()
