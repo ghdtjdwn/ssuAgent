@@ -24,6 +24,12 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 
+from ssu_agent.agents.auth_guard import (
+    auth_denial_status,
+    contains_internal_auth_guidance,
+    sanitize_messages_for_model,
+    sanitize_tool_result_for_model,
+)
 from ssu_agent.supervisor.state import SsuAgentState
 from ssu_agent.tool_results import content_to_text, sanitize_tool_pairing, tool_result_to_text
 
@@ -35,6 +41,11 @@ logger = logging.getLogger(__name__)
 # while stopping exploratory re-call storms that used to push latency past 60s.
 _MAX_TOOL_TURNS = 4
 EMPTY_RESPONSE_FALLBACK = "요청을 처리하지 못했어요. 다시 한 번 구체적으로 말씀해 주세요."
+_AGENT_NAMES_BY_TAG = {
+    "학사 에이전트": "academic_agent",
+    "도서관 에이전트": "library_agent",
+    "LMS 에이전트": "lms_agent",
+}
 
 
 def _provider_label(llm: BaseChatModel) -> str:
@@ -42,7 +53,12 @@ def _provider_label(llm: BaseChatModel) -> str:
     return getattr(llm, "model_name", None) or getattr(llm, "model", None) or type(llm).__name__
 
 
-async def _run_tool_call(tc: dict, tools: list[BaseTool], config: RunnableConfig) -> ToolMessage:
+async def _run_tool_call(
+    tc: dict,
+    tools: list[BaseTool],
+    config: RunnableConfig,
+    mcp_session_id: str | None = None,
+) -> ToolMessage:
     """Execute one tool call and return its ToolMessage. Never raises so the
     surrounding asyncio.gather resolves for every call in the turn."""
     call_id = tc.get("id", "")
@@ -53,9 +69,17 @@ async def _run_tool_call(tc: dict, tools: list[BaseTool], config: RunnableConfig
     started = time.perf_counter()
     try:
         result = await matched.ainvoke(tc.get("args", {}), config=config)
-        content = tool_result_to_text(result)
+        content = sanitize_tool_result_for_model(
+            tool_result_to_text(result),
+            mcp_session_id,
+        )
     except Exception as tool_exc:
-        content = f"Tool error: {tool_exc}"
+        logger.warning(
+            "tool %s failed: type=%s",
+            name,
+            type(tool_exc).__name__,
+        )
+        content = "Tool error: upstream tool failed."
     logger.info("tool %s finished in %.2fs", name, time.perf_counter() - started)
     return ToolMessage(content=content, tool_call_id=call_id)
 
@@ -118,6 +142,60 @@ def drop_routing_messages(messages: list) -> list:
     return result
 
 
+def latest_turn_messages(
+    messages: list,
+    *,
+    agent_tag: str | None = None,
+    include_previous_turn: bool = False,
+) -> list:
+    """Keep the current request plus, at most, one relevant sub-agent turn.
+
+    A specialist must not receive unrelated completed meal/library/academic
+    turns just because they share a checkpoint. Consecutive follow-ups still
+    need the immediately preceding answer from the same specialist. The
+    supervisor can opt into one preceding completed turn for short ambiguous
+    follow-ups such as "자료구조요", "지난학기요", or "그럼 내일은?".
+    """
+    latest_human_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if isinstance(messages[index], HumanMessage)
+        ),
+        None,
+    )
+    if latest_human_index is None:
+        return list(messages)
+
+    current_turn = list(messages[latest_human_index:])
+    if agent_tag is None and not include_previous_turn:
+        return current_turn
+
+    previous_human_index: int | None = None
+    previous_answer: AIMessage | None = None
+    for index in range(latest_human_index - 1, -1, -1):
+        message = messages[index]
+        if previous_answer is None and isinstance(message, AIMessage):
+            if content_to_text(message.content).strip() and not message.tool_calls:
+                previous_answer = message
+        if isinstance(message, HumanMessage):
+            previous_human_index = index
+            break
+
+    if previous_human_index is None or previous_answer is None:
+        return current_turn
+
+    previous_text = content_to_text(previous_answer.content)
+    if agent_tag is not None:
+        expected_name = _AGENT_NAMES_BY_TAG.get(agent_tag)
+        has_matching_name = expected_name is not None and previous_answer.name == expected_name
+        has_legacy_prefix = previous_text.lstrip().startswith(f"[{agent_tag}]")
+        if not has_matching_name and not has_legacy_prefix:
+            return current_turn
+
+    return [*messages[previous_human_index:latest_human_index], *current_turn]
+
+
 def _content_is_blank(content: object) -> bool:
     if isinstance(content, str):
         return not content.strip()
@@ -150,6 +228,7 @@ async def run_react_loop(
     tag: str,
     state: SsuAgentState,
     config: RunnableConfig,
+    auth_required_message: str | None = None,
 ) -> dict:
     """Run the bind_tools ReAct loop with per-provider fallback.
 
@@ -157,7 +236,13 @@ async def run_react_loop(
     the next. Returns a single ``[{tag} ...]``-tagged AIMessage and clears
     ``active_agent`` so control returns to the supervisor.
     """
-    messages = drop_routing_messages(state["messages"])
+    messages = sanitize_messages_for_model(
+        latest_turn_messages(
+            drop_routing_messages(state["messages"]),
+            agent_tag=tag,
+        ),
+        state.get("mcp_session_id"),
+    )
     input_messages = sanitize_tool_pairing([SystemMessage(content=system_prompt), *messages])
 
     last_exc: Exception | None = None
@@ -173,6 +258,13 @@ async def run_react_loop(
                 history.append(response)
 
                 if not response.tool_calls:
+                    if auth_required_message and contains_internal_auth_guidance(
+                        content_to_text(response.content)
+                    ):
+                        return {
+                            "messages": [AIMessage(content=f"[{tag}] {auth_required_message}")],
+                            "active_agent": None,
+                        }
                     logger.info(
                         "[%s] provider=%s turn=%d final (%.2fs)",
                         tag,
@@ -196,9 +288,25 @@ async def run_react_loop(
                     [tc.get("name") for tc in response.tool_calls],
                 )
                 tool_messages = await asyncio.gather(
-                    *(_run_tool_call(tc, tools, config) for tc in response.tool_calls)
+                    *(
+                        _run_tool_call(
+                            tc,
+                            tools,
+                            config,
+                            state.get("mcp_session_id"),
+                        )
+                        for tc in response.tool_calls
+                    )
                 )
                 history.extend(tool_messages)
+                if auth_required_message and any(
+                    auth_denial_status(content_to_text(message.content)) is not None
+                    for message in tool_messages
+                ):
+                    return {
+                        "messages": [AIMessage(content=f"[{tag}] {auth_required_message}")],
+                        "active_agent": None,
+                    }
 
             apply_empty_response_fallback(history[len(input_messages) :])
             last_ai = next(
@@ -221,6 +329,7 @@ async def run_react_loop(
                 # deliberately diverges, so it needs a fresh id or SSE id-dedup
                 # drops it (regression from ef0dff4).
                 id=None if last_ai is None or fallback_applied else last_ai.id,
+                name=_AGENT_NAMES_BY_TAG.get(tag),
             )
             return {"messages": [tagged], "active_agent": None}
         except Exception as exc:
@@ -228,7 +337,10 @@ async def run_react_loop(
             # the last exception, hiding WHY the earlier (preferred) providers
             # failed when diagnosing quota/schema errors in prod.
             logger.warning(
-                "[%s] provider=%s failed: %s: %s", tag, provider, type(exc).__name__, exc
+                "[%s] provider=%s failed: type=%s",
+                tag,
+                provider,
+                type(exc).__name__,
             )
             last_exc = exc
 

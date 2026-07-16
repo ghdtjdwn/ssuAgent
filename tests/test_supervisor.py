@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
+from pydantic import Field
 
 from ssu_agent.agents.library import _LIBRARY_RESERVATION_LOGIN_MESSAGE
 from ssu_agent.supervisor.graph import (
     _deterministic_route,
+    _supervisor_model_messages,
     build_supervisor_graph,
     categorise_tools,
 )
@@ -48,9 +50,9 @@ def get_lms_dashboard(mcp_session_id: str) -> str:
 
 
 @tool
-def get_library_available_seats() -> str:
-    """도서관 좌석 현황"""
-    return '{"floors": []}'
+def get_library_seat_status(floor: int, compact: bool | None = None) -> str:
+    """공개 도서관 층별 좌석 현황."""
+    return '{"floor": 5, "availableSeats": 17}'
 
 
 @tool
@@ -100,7 +102,7 @@ MOCK_TOOLS = [
     get_my_grades,
     get_my_assignments,
     get_lms_dashboard,
-    get_library_available_seats,
+    get_library_seat_status,
     prepare_reserve_library_seat,
     confirm_action,
     start_auth,
@@ -117,7 +119,7 @@ MOCK_TOOLS = [
 def test_categorise_splits_library_tools():
     cats = categorise_tools(MOCK_TOOLS)
     lib_names = {t.name for t in cats["library"]}
-    assert "get_library_available_seats" in lib_names
+    assert "get_library_seat_status" in lib_names
     assert "prepare_reserve_library_seat" in lib_names
     assert "confirm_action" in lib_names
 
@@ -182,8 +184,16 @@ def test_state_has_required_keys():
 class _MockLLM(FakeMessagesListChatModel):
     """Fake LLM that always returns a direct answer (no tool calls, no routing)."""
 
+    bound_tool_names: list[str] = Field(default_factory=list)
+    seen_inputs: list[list] = Field(default_factory=list)
+
     def bind_tools(self, tools, **kwargs):
+        self.bound_tool_names = [tool.name for tool in tools]
         return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ANN001
+        self.seen_inputs.append(messages)
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
 def _make_mock_llm() -> _MockLLM:
@@ -237,6 +247,57 @@ async def test_graph_initial_state_has_mcp_session():
     )
     # State should carry mcp_session_id through
     assert result.get("mcp_session_id") == "session-abc"
+
+
+@pytest.mark.asyncio
+async def test_supervisor_never_sees_auth_tools_or_historical_session_artifacts():
+    from langgraph.checkpoint.memory import MemorySaver
+
+    session_id = "historical-supervisor-session"
+    auth_url = "https://ssumcp.duckdns.org/api/mcp/auth/library/start?state=secret"
+    llm = _make_mock_llm()
+    graph = await build_supervisor_graph(
+        all_tools=MOCK_TOOLS,
+        llm=llm,
+        checkpointer=MemorySaver(),
+    )
+
+    await graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(content="도서관 대출 알려줘"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "old-auth-1",
+                            "name": "start_auth",
+                            "args": {"mcp_session_id": session_id},
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    content=(
+                        '{"status":"OK","mcpSessionId":"historical-supervisor-session",'
+                        f'"loginUrl":"{auth_url}"}}'
+                    ),
+                    tool_call_id="old-auth-1",
+                ),
+                HumanMessage(content="안녕"),
+            ],
+            "mcp_session_id": session_id,
+            "library_connected": True,
+            "active_agent": None,
+        },
+        config={"configurable": {"thread_id": "supervisor-auth-boundary"}},
+    )
+
+    assert "start_auth" not in llm.bound_tool_names
+    model_input = repr(llm.seen_inputs[0])
+    assert session_id not in model_input
+    assert auth_url not in model_input
+    assert "mcp_session_id" not in model_input
 
 
 def test_deterministic_route_exact_library_transcript() -> None:
@@ -363,6 +424,26 @@ def test_deterministic_route_unrelated_messages_stay_with_supervisor() -> None:
         )
         is None
     )
+
+
+def test_supervisor_model_messages_drop_previous_domain_for_clear_new_request() -> None:
+    messages = [
+        HumanMessage(content="오늘 학식 뭐야?"),
+        AIMessage(content="오늘 학식은 비빔밥입니다.", name="supervisor"),
+        HumanMessage(content="졸업까지 어떤 조건들이 남았어?"),
+    ]
+
+    assert _supervisor_model_messages(messages) == [messages[-1]]
+
+
+def test_supervisor_model_messages_keep_one_turn_for_short_followup() -> None:
+    messages = [
+        HumanMessage(content="어떤 과목의 자료를 받을까요?"),
+        AIMessage(content="[LMS 에이전트] 어떤 과목의 자료를 원하세요?"),
+        HumanMessage(content="자료구조요"),
+    ]
+
+    assert _supervisor_model_messages(messages) == messages
 
 
 @pytest.mark.parametrize(

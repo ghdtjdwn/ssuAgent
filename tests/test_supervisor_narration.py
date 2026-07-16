@@ -122,6 +122,16 @@ def _chain_start(node: str) -> dict:
     }
 
 
+def _chain_messages(node: str, messages: list[AIMessage]) -> dict:
+    return {
+        "event": "on_chain_stream",
+        "name": node,
+        "tags": [],
+        "metadata": {},
+        "data": {"chunk": {"messages": messages}},
+    }
+
+
 async def _collect(
     input_data: dict | object | None = None,
     config: dict | None = None,
@@ -252,6 +262,39 @@ async def test_supervisor_direct_answer_is_kept(monkeypatch) -> None:
 
     text = "".join(e["content"] for e in out if e["type"] == "text")
     assert "무엇을 도와드릴까요" in text
+
+
+async def test_replaced_subagent_auth_url_is_not_flushed_after_safe_reply(monkeypatch) -> None:
+    unsafe_url = "https://ssumcp.duckdns.org/api/mcp/auth/saint/start?state=secret"
+    safe_reply = "[학사 에이전트] 화면 상단의 ‘연결’에서 u-SAINT를 연결해 주세요."
+    events = [
+        _chain_start("academic_agent"),
+        _model("agent", unsafe_url),
+        _chain_messages("agent", [AIMessage(content=safe_reply, id="safe-auth-reply")]),
+    ]
+    monkeypatch.setattr(main, "_graph", _FakeGraph(events))
+
+    out = await _collect()
+
+    text = "".join(e["content"] for e in out if e["type"] == "text")
+    assert text == safe_reply
+    assert unsafe_url not in text
+    assert "/api/mcp/auth/" not in text
+
+
+async def test_supervisor_auth_url_hallucination_is_replaced_before_flush(monkeypatch) -> None:
+    unsafe_url = "https://ssumcp.duckdns.org/api/mcp/auth/lms/start?state=secret"
+    monkeypatch.setattr(
+        main,
+        "_graph",
+        _FakeGraph([_model("agent", unsafe_url, tags=["supervisor_llm"])]),
+    )
+
+    out = await _collect()
+
+    text = "".join(e["content"] for e in out if e["type"] == "text")
+    assert "화면 상단의 ‘연결’" in text
+    assert unsafe_url not in text
 
 
 async def test_real_supervisor_graph_suppresses_handoff_narration(monkeypatch) -> None:

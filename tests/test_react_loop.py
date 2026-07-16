@@ -14,11 +14,13 @@ import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
+from pydantic import Field
 
 from ssu_agent.agents.react_loop import (
     _MAX_TOOL_TURNS,
     EMPTY_RESPONSE_FALLBACK,
     drop_routing_messages,
+    latest_turn_messages,
     run_react_loop,
 )
 from ssu_agent.supervisor.state import SsuAgentState
@@ -29,6 +31,14 @@ class _SeqLLM(FakeMessagesListChatModel):
 
     def bind_tools(self, tools, **kwargs):
         return self
+
+
+class _CapturingSeqLLM(_SeqLLM):
+    seen_inputs: list[list] = Field(default_factory=list)
+
+    async def ainvoke(self, input, config=None, **kwargs):
+        self.seen_inputs.append(list(input) if isinstance(input, list) else input)
+        return await super().ainvoke(input, config=config, **kwargs)
 
 
 def _state() -> SsuAgentState:
@@ -113,6 +123,46 @@ def test_drop_routing_messages_preserves_completed_supervisor_turns():
         "오늘 학식은 제육볶음입니다.",
         "내 졸업요건 알려줘",
     ]
+
+
+def test_latest_turn_messages_drops_unrelated_completed_turns():
+    messages = [
+        HumanMessage(content="오늘 학식 뭐야?"),
+        AIMessage(content="오늘 학식은 비빔밥입니다.", name="supervisor"),
+        HumanMessage(content="내 졸업요건 알려줘"),
+    ]
+
+    assert latest_turn_messages(messages, agent_tag="학사 에이전트") == [messages[-1]]
+
+
+def test_latest_turn_messages_keeps_immediately_previous_same_agent_turn():
+    messages = [
+        HumanMessage(content="내 졸업요건 알려줘"),
+        AIMessage(content="[학사 에이전트] 전공 학점이 부족해요."),
+        HumanMessage(content="몇 학점 남았어?"),
+    ]
+
+    assert latest_turn_messages(messages, agent_tag="학사 에이전트") == messages
+
+
+def test_latest_turn_messages_uses_agent_name_instead_of_display_prefix():
+    messages = [
+        HumanMessage(content="내 성적 알려줘"),
+        AIMessage(content="어느 학기를 볼까요?", name="academic_agent"),
+        HumanMessage(content="지난학기요"),
+    ]
+
+    assert latest_turn_messages(messages, agent_tag="학사 에이전트") == messages
+
+
+def test_latest_turn_messages_drops_previous_different_named_agent_turn():
+    messages = [
+        HumanMessage(content="도서관 빈자리 알려줘"),
+        AIMessage(content="5층에 17석 있어요.", name="library_agent"),
+        HumanMessage(content="지난학기요"),
+    ]
+
+    assert latest_turn_messages(messages, agent_tag="학사 에이전트") == [messages[-1]]
 
 
 def test_drop_routing_messages_handles_mixed_public_and_transfer_calls():
@@ -299,3 +349,137 @@ async def test_content_block_final_answer_is_flattened_and_reuses_model_id():
     assert tagged.content == "[학사 에이전트] 졸업 요건은 130학점입니다."
     assert tagged.id == "claude-final-1"
     assert "{" not in tagged.content
+
+
+@pytest.mark.asyncio
+async def test_structured_invalid_session_stops_before_model_synthesis():
+    @tool
+    def private_lookup() -> str:
+        """Private lookup fixture."""
+        return (
+            '{"status":"INVALID_SESSION","mcpSessionId":null,'
+            '"developerMessage":"Call start_auth with mcp_session_id"}'
+        )
+
+    llm = _SeqLLM(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "private_lookup", "args": {}, "id": "private-1"}],
+            ),
+            AIMessage(content="MCP session ID를 알려주세요."),
+        ]
+    )
+
+    result = await run_react_loop(
+        [llm],
+        [private_lookup],
+        "시스템",
+        "학사 에이전트",
+        _state(),
+        {},
+        auth_required_message="화면 상단의 연결에서 다시 연결해 주세요.",
+    )
+
+    assert result["messages"][-1].content == (
+        "[학사 에이전트] 화면 상단의 연결에서 다시 연결해 주세요."
+    )
+
+
+@pytest.mark.asyncio
+async def test_auth_status_name_inside_normal_data_does_not_trigger_guard():
+    @tool
+    def public_policy() -> str:
+        """Public policy fixture."""
+        return '{"status":"OK","data":{"note":"AUTH_REQUIRED is a documented status"}}'
+
+    llm = _SeqLLM(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "public_policy", "args": {}, "id": "public-1"}],
+            ),
+            AIMessage(content="공개 정책 답변입니다."),
+        ]
+    )
+
+    result = await run_react_loop(
+        [llm],
+        [public_policy],
+        "시스템",
+        "학사 에이전트",
+        _state(),
+        {},
+        auth_required_message="연결해 주세요.",
+    )
+
+    assert result["messages"][-1].content == "[학사 에이전트] 공개 정책 답변입니다."
+
+
+@pytest.mark.asyncio
+async def test_tool_exception_details_never_reach_next_model_turn():
+    @tool
+    def failing_lookup() -> str:
+        """Fail with a sensitive upstream detail."""
+        raise RuntimeError("backend rejected session raw-exception-secret")
+
+    llm = _CapturingSeqLLM(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "failing_lookup", "args": {}, "id": "failure-1"}],
+            ),
+            AIMessage(content="조회에 실패했습니다."),
+        ]
+    )
+
+    await run_react_loop([llm], [failing_lookup], "시스템", "테스트", _state(), {})
+
+    second_turn = repr(llm.seen_inputs[1])
+    assert "raw-exception-secret" not in second_turn
+    assert "Tool error: upstream tool failed." in second_turn
+
+
+@pytest.mark.asyncio
+async def test_cross_agent_history_is_removed_before_model_invocation():
+    session_id = "library-history-secret"
+    auth_url = "https://ssumcp.duckdns.org/api/mcp/auth/library/start?state=secret"
+    state: SsuAgentState = {
+        "messages": [
+            HumanMessage(content="도서관 5층 빈 자리 있어?"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_my_library_seat",
+                        "args": {"mcp_session_id": session_id},
+                        "id": "library-history-1",
+                    }
+                ],
+            ),
+            ToolMessage(
+                content=(
+                    '{"status":"OK","mcpSessionId":"library-history-secret",'
+                    '"loginUrl":"https://ssumcp.duckdns.org/api/mcp/auth/library/'
+                    'start?state=secret","data":{"available":8}}'
+                ),
+                tool_call_id="library-history-1",
+            ),
+            AIMessage(content=f"로그인: {auth_url}"),
+            HumanMessage(content="일반 졸업 기준 알려줘"),
+        ],
+        "mcp_session_id": session_id,
+        "library_connected": True,
+        "active_agent": "academic",
+    }
+    llm = _CapturingSeqLLM(responses=[AIMessage(content="공개 기준 답변")])
+
+    await run_react_loop([llm], [], "시스템", "학사 에이전트", state, {})
+
+    model_input = repr(llm.seen_inputs[0])
+    assert session_id not in model_input
+    assert auth_url not in model_input
+    assert "mcp_session_id" not in model_input
+    assert '"available": 8' not in model_input
+    assert "도서관 5층" not in model_input
+    assert "일반 졸업 기준 알려줘" in model_input

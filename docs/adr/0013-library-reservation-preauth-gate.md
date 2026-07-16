@@ -68,6 +68,19 @@ backstop은 계속 ssuMCP의 `AUTH_REQUIRED` 결과와 ssuAgent의 후처리 gua
 무료 LLM rate limit 또는 provider fallback은 관찰을 혼동할 수 있으므로, 무료 LLM이
 rate-limited되지 않은 상태에서 재검증한다.
 
+## 후속 수정 (2026-07-16) - 공개 좌석 MCP 계약 정렬
+
+위 prompt 보강만으로는 실제 동작할 수 없었다. 당시 ssuMCP의 `get_library_seat_status` schema가
+`mcp_session_id`를 요구했고, ssuAgent는 무세션 요청에서 session-bearing 도구를 모델 목록에서
+제거하기 때문이다. 반면 ssuMCP REST 좌석 집계는 이미 내부 sampler token으로 공개 조회를
+제공하고 있었다.
+
+ssuMCP의 층별 집계 도구를 같은 공개 service 경계로 정렬하고 session 인자를 제거했다. 이제
+“도서관 5층 빈 자리 있어?”는 로그인 없이 `get_library_seat_status(floor=5)`를 호출한다.
+per-seat 추천·예약·이석·반납·내 좌석·대출은 사용자별 정보 또는 동작이므로 계속 도서관 연결을
+요구한다. ssuAgent 회귀 테스트도 실제 공개 도구 schema와 동일하게 바꿔 prompt와 계약이 다시
+엇갈리지 않도록 했다.
+
 ## 거부한 대안
 
 ### `library_connected`를 인증 근거로 사용

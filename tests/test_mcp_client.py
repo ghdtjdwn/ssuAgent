@@ -35,6 +35,41 @@ async def test_retry_wrapper_retries_transport_exception_once():
 
 
 @pytest.mark.asyncio
+async def test_retry_wrapper_log_excludes_exception_secrets(monkeypatch: pytest.MonkeyPatch):
+    fake_session_reference = "6aeb547f-b936-49de-a4dc-a8624c1318db"
+    auth_url = "https://ssumcp.duckdns.org/api/mcp/auth/saint/start?state=private"
+    calls = 0
+
+    async def flaky_tool_impl() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadError(f"session={fake_session_reference} url={auth_url}")
+        return "ok"
+
+    flaky_tool = StructuredTool.from_function(
+        coroutine=flaky_tool_impl,
+        name="secret_bearing_tool",
+        description="Retry logging fixture.",
+    )
+    wrapped = wrap_mcp_tool_for_retry(flaky_tool, retry_backoff_seconds=0)
+    emitted: list[str] = []
+
+    def capture_warning(message: str, *args, **kwargs) -> None:
+        assert not kwargs.get("exc_info")
+        emitted.append(message % args)
+
+    monkeypatch.setattr("ssu_agent.mcp_client.logger.warning", capture_warning)
+
+    assert await wrapped.ainvoke({}) == "ok"
+    log_text = "\n".join(emitted)
+    assert "secret_bearing_tool" in log_text
+    assert "ReadError" in log_text
+    assert fake_session_reference not in log_text
+    assert auth_url not in log_text
+
+
+@pytest.mark.asyncio
 async def test_retry_wrapper_does_not_retry_non_transport_exception():
     calls = 0
 

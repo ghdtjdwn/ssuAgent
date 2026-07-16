@@ -17,7 +17,8 @@ MCP session lifecycle (thread_id ↔ mcp_session_id ↔ principal):
   Every FastAPI request carries a `thread_id` (stable per user/device) used
   as the LangGraph checkpoint key. The `mcp_session_id` (ssuMCP private tool
   auth token) is passed in the request body and stored in SsuAgentState so
-  sub-agents can include it in private MCP tool calls.
+  sub-agents can inject it into private MCP tool calls outside model-visible
+  prompts, schemas, results, and persisted assistant/tool messages.
 
   The three concepts are intentionally separate:
   - thread_id: conversation persistence (Postgres checkpoint)
@@ -84,6 +85,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from ssu_agent import config
+from ssu_agent.agents.auth_guard import contains_internal_auth_guidance
 from ssu_agent.mcp_client import create_mcp_client
 from ssu_agent.supervisor.graph import build_supervisor_graph
 
@@ -126,6 +128,10 @@ _pool: AsyncConnectionPool | None = None
 _DEEP_HEALTH_MCP_TIMEOUT_SECONDS = 2.0
 
 _THREAD_OWNER_FORBIDDEN_DETAIL = "이 대화는 현재 세션의 소유가 아닙니다."
+_STREAM_AUTH_FALLBACK = (
+    "학교 서비스 연결은 화면 상단의 ‘연결’에서 진행해 주세요. 로그인 정보나 내부 인증 값은 "
+    "채팅에 입력하지 않아도 돼요."
+)
 
 _TOOL_LABELS: dict[str, str] = {
     "prepare_reserve_library_seat": "좌석 예약 준비 중...",
@@ -658,14 +664,21 @@ async def _stream_graph(input_data: dict | object, config: dict):
                                 continue
                             if msg_id:
                                 streamed_message_ids.add(msg_id)
+                            # A graph-generated reply supersedes any buffered raw
+                            # model text (for example, an auth-URL hallucination
+                            # replaced by a deterministic connection notice).
+                            subagent_buf = ""
+                            if contains_internal_auth_guidance(content):
+                                content = _STREAM_AUTH_FALLBACK
                             cleaned = stripper.feed(content)
                             if cleaned:
                                 yield _sse({"type": "text", "content": cleaned})
 
     except Exception as exc:
-        # Do not reflect the exception detail to the client — it can carry
-        # internal stack / DB context. The full traceback is logged server-side.
-        logger.exception("agent stream failed")
+        # Do not reflect or log exception text: upstream adapter errors can
+        # contain authentication arguments. The exception type is sufficient
+        # for aggregate diagnosis and fixed client messaging.
+        logger.warning("agent stream failed: type=%s", type(exc).__name__)
         # LLM providers (free-tier or the optional paid Anthropic key, ADR 0015) are
         # frequently rate-limited/quota-exhausted (429). Surface a clear, honest message
         # for that case instead of a generic "error" so users (and portfolio viewers)
@@ -681,10 +694,14 @@ async def _stream_graph(input_data: dict | object, config: dict):
 
     # Supervisor answered directly (no routing): flush the held text as the real answer.
     if supervisor_buf and not supervisor_routed:
+        if contains_internal_auth_guidance(supervisor_buf):
+            supervisor_buf = _STREAM_AUTH_FALLBACK
         cleaned = stripper.feed(supervisor_buf)
         if cleaned:
             yield _sse({"type": "text", "content": cleaned})
     if subagent_buf:
+        if contains_internal_auth_guidance(subagent_buf):
+            subagent_buf = _STREAM_AUTH_FALLBACK
         cleaned = stripper.feed(subagent_buf)
         if cleaned:
             yield _sse({"type": "text", "content": cleaned})

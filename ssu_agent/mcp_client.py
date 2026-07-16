@@ -148,10 +148,9 @@ class _RetryingMCPTool(BaseTool):
             if not _is_retryable_mcp_transport_error(exc):
                 raise
             logger.warning(
-                "Retrying MCP tool %s once after transport/session failure: %s",
+                "Retrying MCP tool %s once after retryable transport failure: type=%s",
                 self.name,
-                exc,
-                exc_info=True,
+                type(exc).__name__,
             )
 
         await asyncio.sleep(self._retry_backoff_seconds)

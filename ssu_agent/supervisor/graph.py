@@ -15,7 +15,7 @@ Why NOT pure conditional-edges on supervisor LLM output:
 
 Chosen pattern — "Route Marker + Post-Router":
   1. supervisor_react: create_agent with public tools (meal, notice,
-     campus, auth) + lightweight routing tools that return a "ROUTE_TO:X" marker.
+     campus) + lightweight routing tools that return a "ROUTE_TO:X" marker.
      The marker tools do NO work; they're lightweight signals for step 2.
   2. post_supervisor_node: scans state for routing markers and returns
      Command(goto=target) to transition the parent graph to a sub-agent node.
@@ -38,9 +38,9 @@ Parent-Child State design:
 
 MCP session lifecycle:
   thread_id (LangGraph checkpoint key) maps 1:1 with a FastAPI client
-  connection. mcp_session_id (ssuMCP private tool auth) is passed in the initial
-  request body and stored in SsuAgentState. Sub-agents receive it via state and
-  include it in private tool calls as instructed by their system prompts.
+  connection. mcp_session_id (ssuMCP private tool auth) is stored in state but
+  redacted at every model boundary. Auth lifecycle UX stays browser-owned;
+  session-bound sub-agent tools inject the handle only during execution.
 
 Streaming:
   FastAPI calls graph.astream_events(version="v2") and filters:
@@ -64,8 +64,14 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
 from ssu_agent.agents.academic import build_academic_agent
+from ssu_agent.agents.auth_guard import (
+    contains_internal_auth_guidance,
+    sanitize_messages_for_model,
+    tools_for_model,
+)
 from ssu_agent.agents.library import build_library_agent
 from ssu_agent.agents.lms import build_lms_agent
+from ssu_agent.agents.react_loop import drop_routing_messages, latest_turn_messages
 from ssu_agent.llm_factory import get_llm_sequence
 from ssu_agent.supervisor.state import SsuAgentState
 from ssu_agent.tool_results import content_to_text, sanitize_tool_pairing
@@ -229,7 +235,7 @@ _LIBRARY_CLARIFICATION_CUES = (
 _SUPERVISOR_PROMPT = """당신은 숭실대학교 AI 어시스턴트입니다.
 
 역할:
-1. 식단(meal), 공지(notice), 캠퍼스 시설(facility), 인증(auth) 관련
+1. 식단(meal), 공지(notice), 캠퍼스 시설(facility) 관련
    간단한 질문은 직접 도구를 호출해 답합니다.
 2. 도서관(library), 학사(academic), LMS 관련 전문 질문은 해당 에이전트로 전달합니다:
    - 도서관 좌석/예약/도서 → transfer_to_library_agent
@@ -243,14 +249,37 @@ LMS 강의자료 내보내기 플로우 안내:
 get_my_lms_courses → get_my_lms_materials → prepare_lms_material_export
 → confirm_lms_material_export → 다운로드 링크 제공 (유효기간 20분).
 
-전달 시 사용자의 원래 질문을 query에 그대로 포함하세요.
-이미 하위 에이전트 답변([도서관/학사/LMS 에이전트])이 대화에 있다면
-별도 도구 호출 없이 답변을 요약해 사용자에게 전달하세요.
+전달 시 가장 최근 사용자 질문을 query에 그대로 포함하세요. 과거에 끝난 다른 요청이나 답변을
+다시 요약하지 마세요. 현재 질문이 짧은 후속 표현일 때만 함께 제공된 직전 하위 에이전트 답변을
+문맥으로 사용하세요.
 
 라우팅 규칙(중요): 인사·잡담(예: "안녕", "뭐해")이나 도서관/학사/LMS 어디에도
 해당하지 않는 범위 밖 질문은 transfer 도구를 호출하지 말고 당신이 직접 간단히
 답하세요. 전문 에이전트는 실제로 해당 도메인 데이터가 필요할 때만 호출합니다.
+인증 시작·세션 전달·로그인 URL 생성은 채팅 모델의 역할이 아닙니다. 사용자에게 내부 세션
+값이나 서버 로그인 URL을 요청하거나 보여주지 마세요.
 """
+
+_SUPERVISOR_AUTH_FALLBACK = (
+    "학교 서비스 연결은 화면 상단의 ‘연결’에서 진행해 주세요. 로그인 정보나 내부 인증 값은 "
+    "채팅에 입력하지 않아도 돼요."
+)
+_STANDALONE_DOMAIN_REQUEST_RE = re.compile(
+    r"도서관|좌석|예약|대출|도서|성적|졸업|장학|채플|학점|gpa|"
+    r"lms|과제|강의자료|수업자료|다운로드|학식|메뉴|식당|공지|캠퍼스|시설",
+    re.IGNORECASE,
+)
+
+
+def _supervisor_model_messages(messages: list) -> list:
+    latest_text = _latest_human_message_text(messages).strip()
+    include_previous_turn = len(latest_text) <= 40 and not _STANDALONE_DOMAIN_REQUEST_RE.search(
+        latest_text
+    )
+    return latest_turn_messages(
+        drop_routing_messages(messages),
+        include_previous_turn=include_previous_turn,
+    )
 
 
 # ── Post-supervisor routing node ──────────────────────────────────────────────
@@ -374,8 +403,9 @@ async def build_supervisor_graph(
     cats = categorise_tools(all_tools)
     routing_tools = _make_routing_tools()
 
-    # Supervisor: public tools (meal/notice/campus) + auth + lightweight routing tools
-    supervisor_tools = [*cats["public"], *cats["auth"], *routing_tools]
+    # Browser-owned auth lifecycle tools and session-bearing tools never cross
+    # the supervisor model boundary.
+    supervisor_tools = tools_for_model([*cats["public"], *routing_tools], None)
     llm_seq = [llm] if llm is not None else get_llm_sequence()
     # Build one ReAct agent per provider ONCE. The tools and prompt are static for
     # the graph's lifetime, so constructing create_agent inside the node
@@ -392,7 +422,12 @@ async def build_supervisor_graph(
             **config,
             "tags": [*(config.get("tags") or []), "supervisor_llm"],
         }
-        input_messages = sanitize_tool_pairing(state["messages"])
+        input_messages = sanitize_tool_pairing(
+            sanitize_messages_for_model(
+                _supervisor_model_messages(state["messages"]),
+                state.get("mcp_session_id"),
+            )
+        )
         input_message_count = len(input_messages)
         for idx, react in enumerate(supervisor_reacts):
             try:
@@ -400,16 +435,23 @@ async def build_supervisor_graph(
                     {"messages": input_messages},
                     config=supervisor_config,
                 )
-                new_messages = result["messages"][input_message_count:]
+                new_messages = sanitize_messages_for_model(
+                    result["messages"][input_message_count:],
+                    state.get("mcp_session_id"),
+                )
                 for msg in new_messages:
                     if isinstance(msg, AIMessage):
                         msg.name = "supervisor"
+                        if contains_internal_auth_guidance(content_to_text(msg.content)):
+                            msg.content = "" if msg.tool_calls else _SUPERVISOR_AUTH_FALLBACK
                 return {"messages": new_messages}
             except Exception as exc:
                 # Same rationale as react_loop: surface WHY each provider failed
                 # instead of only re-raising the last one.
                 logger.warning(
-                    "[supervisor] provider #%d failed: %s: %s", idx, type(exc).__name__, exc
+                    "[supervisor] provider #%d failed: type=%s",
+                    idx,
+                    type(exc).__name__,
                 )
                 last_exc = exc
         raise last_exc or RuntimeError("All LLM providers exhausted")

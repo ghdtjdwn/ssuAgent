@@ -32,12 +32,11 @@ Tool split:
   The graph layer enforces the approval gate before running confirm_action.
 
 Why manual bind_tools loop instead of create_react_agent:
-  In controlled A/B testing (turn-2 path: prepare_* → AUTH_REQUIRED → start_auth),
+  In controlled A/B testing after a prepare_* authentication denial,
   create_react_agent exhibited looping — it called prepare_reserve_library_seat
-  twice instead of advancing to start_auth on the second turn. In the HITL flow
-  this would produce two distinct actionIds; _extract_action_id scans recent
-  ToolMessages and would gate on the wrong/stale action, breaking the approval gate.
-  The manual loop's explicit break-after-actionId prevents this entirely.
+  twice. In the HITL flow this could produce two distinct actionIds;
+  _extract_action_id would then gate on the wrong/stale action. The manual loop's
+  explicit structured-auth stop and break-after-actionId prevent this entirely.
   (A malformed <function=...> XML tool call was observed once in production logs,
   but was not reproducible in controlled testing — XML causation is unconfirmed.)
 """
@@ -58,10 +57,19 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
 
+from ssu_agent.agents.auth_guard import (
+    auth_denial_status,
+    contains_internal_auth_guidance,
+    redact_internal_auth_artifacts,
+    sanitize_messages_for_model,
+    sanitize_tool_result_for_model,
+    tools_for_model,
+)
 from ssu_agent.agents.react_loop import (
     EMPTY_RESPONSE_FALLBACK,
     apply_empty_response_fallback,
     drop_routing_messages,
+    latest_turn_messages,
 )
 from ssu_agent.llm_factory import create_llm, get_llm_sequence
 from ssu_agent.supervisor.state import SsuAgentState
@@ -74,8 +82,8 @@ _SYSTEM_PROMPT_BASE = """당신은 숭실대학교 도서관 전문 AI 어시스
 CRITICAL RULES — MUST FOLLOW EXACTLY:
 1. Reservation/swap/cancellation → call the matching prepare_* tool IMMEDIATELY.
    Write NO text before the tool call.
-2. If the tool returns AUTH_REQUIRED → call start_auth(provider="library"),
-   then show the returned loginUrl to the user.
+2. If a tool reports an authentication error, stop. The system will show a safe
+   connection notice. Never request or display a session value or login URL.
 3. After prepare_* succeeds → the system handles confirmation UI automatically.
    Do NOT call confirm_action yourself.
 
@@ -84,13 +92,13 @@ CRITICAL RULES — MUST FOLLOW EXACTLY:
 - 예약: prepare_reserve_library_seat
 - 이석: prepare_swap_library_seat
 - 반납: prepare_cancel_library_seat
-- 인증 확인: get_auth_status | 로그인: start_auth(provider="library")
 
 행동 규칙:
 - 예약·이석·반납 요청이 오면 즉시 prepare_* 도구를 호출하세요. 재확인 금지.
-- AUTH_REQUIRED 응답 → start_auth(provider="library") 호출 후 loginUrl 안내.
+- 인증 오류 응답을 직접 해석하거나 로그인 절차를 만들지 마세요.
 - prepare_* 호출 후 시스템이 승인 창을 자동 표시하고 confirm_action을 처리합니다.
-- confirm_action은 직접 호출하지 마세요."""
+- confirm_action은 직접 호출하지 마세요.
+- 가장 최근 사용자 메시지의 도서관 요청만 답하고, 이미 답한 과거 요청을 다시 정리하지 마세요."""
 
 
 _LIBRARY_RESERVATION_LOGIN_MESSAGE = (
@@ -100,6 +108,7 @@ _LIBRARY_RESERVATION_SESSION_MESSAGE = (
     "도서관 로그인은 확인했지만 채팅 세션에 아직 연결되지 않았어요. 잠시 후 다시 시도하거나 "
     "페이지를 새로고침해 주세요. 계속 안 되면 도서관 탭에서 로그인 상태를 확인해 주세요."
 )
+_LIBRARY_AGENT_NAME = "library_agent"
 _RESERVATION_INTENT_RE = re.compile(
     r"\breserv(?:e|ation)\b"
     r"|예약\s*(?:해|해주세요|해줘|해줘요|부탁|진행|시켜|할래|하고\s*싶|하고싶|좀|해주|잡아)"
@@ -122,13 +131,36 @@ def _has_library_reservation_intent(text: str) -> bool:
     return bool(_RESERVATION_INTENT_RE.search(text))
 
 
-def _build_library_prompt(mcp_session_id: str | None) -> str:
+def _library_turn_messages(messages: list) -> list:
+    """Keep one library follow-up turn with durable message provenance.
+
+    Older checkpoints contain the deterministic login gates without an agent
+    name or display prefix. Recognise those exact server-owned messages so a
+    user can finish login after a deploy without losing the reservation request.
+    New messages carry ``name=library_agent`` and do not depend on display text.
+    """
+    cleaned = drop_routing_messages(messages)
+    compatible: list = []
+    for message in cleaned:
+        if (
+            isinstance(message, AIMessage)
+            and message.name is None
+            and content_to_text(message.content)
+            in {_LIBRARY_RESERVATION_LOGIN_MESSAGE, _LIBRARY_RESERVATION_SESSION_MESSAGE}
+        ):
+            compatible.append(message.model_copy(update={"name": _LIBRARY_AGENT_NAME}))
+        else:
+            compatible.append(message)
+    return latest_turn_messages(compatible, agent_tag="도서관 에이전트")
+
+
+def _build_library_prompt(authenticated: bool) -> str:
     prompt = _SYSTEM_PROMPT_BASE
-    if mcp_session_id:
+    if authenticated:
         prompt += (
-            f'\n\n[인증 세션] mcp_session_id = "{mcp_session_id}"\n'
-            "prepare_*, get_my_library_*, get_my_library_seat 등 인증이 필요한 도구 호출 시 "
-            "이 값을 mcp_session_id 파라미터로 반드시 포함하세요."
+            "\n\n[도서관 연결 있음] 인증은 시스템이 필요한 도구에 자동으로 적용합니다. "
+            "내부 인증 값이나 로그인 링크를 사용자에게 보여주거나 직접 알려 달라고 요청하지 "
+            "마세요."
         )
     else:
         # No auth session: reservation / personal library tools would only hit
@@ -212,21 +244,6 @@ def _extract_action_id(messages: list) -> dict | None:
     return None
 
 
-def _extract_login_url(content: str) -> str | None:
-    """Pull the loginUrl out of an AUTH_REQUIRED tool response (top-level or nested)."""
-    try:
-        data = json.loads(content) if isinstance(content, str) else content
-    except (json.JSONDecodeError, TypeError):
-        return None
-    scopes = [data, data.get("data") if isinstance(data, dict) else None]
-    for scope in scopes:
-        if isinstance(scope, dict):
-            url = scope.get("loginUrl") or scope.get("login_url")
-            if isinstance(url, str) and url:
-                return url
-    return None
-
-
 def _has_pending_action(state: SsuAgentState) -> Literal["check_approval", "done"]:
     """Router: check if the agent produced a prepare_* result needing approval."""
     return "check_approval" if _extract_action_id(state["messages"]) else "done"
@@ -282,7 +299,10 @@ _WAIT_STILL_PROCESSING_GUIDANCE = (
 )
 
 
-def _confirm_result_message(raw_result: object) -> str:
+def _confirm_result_message(
+    raw_result: object,
+    mcp_session_id: str | None = None,
+) -> str:
     """Turn a confirm_action tool result into an honest user-facing message.
 
     ssuMCP's confirm_action responds status=="OK" unconditionally (see
@@ -299,23 +319,25 @@ def _confirm_result_message(raw_result: object) -> str:
     Non-OK statuses (e.g. AUTH_REQUIRED raced in between prepare and confirm)
     surface the response's own userMessage when present instead of raw JSON.
     """
-    text = tool_result_to_text(raw_result)
+    text = sanitize_tool_result_for_model(
+        tool_result_to_text(raw_result),
+        mcp_session_id,
+    )
+    if auth_denial_status(text) is not None:
+        return _LIBRARY_RESERVATION_LOGIN_MESSAGE
     try:
         parsed = json.loads(text)
     except (json.JSONDecodeError, TypeError):
         return f"확정 처리 결과를 확인하지 못했어요: {text}"
 
     if not isinstance(parsed, dict) or parsed.get("status") != "OK":
-        # McpPrivateToolResponse carries a user-facing `userMessage` (and a
-        # `loginUrl` on AUTH_REQUIRED, already embedded in userMessage's text).
-        # Prefer it over dumping serialized JSON at the user.
+        # Prefer a safe user-facing message over dumping serialized JSON.
         if isinstance(parsed, dict):
             user_message = parsed.get("userMessage")
             if isinstance(user_message, str) and user_message:
-                login_url = parsed.get("loginUrl")
-                if isinstance(login_url, str) and login_url and login_url not in user_message:
-                    return f"{user_message}\n로그인: {login_url}"
-                return user_message
+                if contains_internal_auth_guidance(user_message):
+                    return "확정 처리에 실패했어요. 잠시 후 다시 시도해 주세요."
+                return redact_internal_auth_artifacts(user_message, mcp_session_id)
         return f"확정 처리에 실패했어요: {text}"
 
     data = parsed.get("data")
@@ -470,7 +492,10 @@ async def _follow_reservation_wait_status(
     mcp_session_id: str | None,
     action_details: dict | None = None,
 ) -> str:
-    raw_confirm_text = tool_result_to_text(raw_confirm_result)
+    raw_confirm_text = sanitize_tool_result_for_model(
+        tool_result_to_text(raw_confirm_result),
+        mcp_session_id,
+    )
     intent_match = _WAIT_INTENT_ID_RE.search(raw_confirm_text)
     if intent_match is None or wait_status_tool is None:
         return accept_message
@@ -481,7 +506,10 @@ async def _follow_reservation_wait_status(
             wait_result = await wait_status_tool.ainvoke(
                 {"mcp_session_id": mcp_session_id, "intent_id": intent_id}
             )
-            wait_text = tool_result_to_text(wait_result)
+            wait_text = sanitize_tool_result_for_model(
+                tool_result_to_text(wait_result),
+                mcp_session_id,
+            )
             status_match = _WAIT_STATUS_RE.search(wait_text)
             status = status_match.group(1) if status_match else None
             detail = _extract_wait_detail(wait_text)
@@ -500,8 +528,11 @@ async def _follow_reservation_wait_status(
 
             if attempt < 2:
                 await asyncio.sleep(1.5)
-    except Exception:
-        logger.exception("library wait-status follow-through failed")
+    except Exception as exc:
+        logger.warning(
+            "library wait-status follow-through failed: type=%s",
+            type(exc).__name__,
+        )
 
     return f"{accept_message}\n{_WAIT_STILL_PROCESSING_GUIDANCE}"
 
@@ -531,28 +562,42 @@ def build_library_agent(
 
     async def agent_node(state: SsuAgentState, config: RunnableConfig) -> dict:
         mcp_session_id = state.get("mcp_session_id")
-        messages = drop_routing_messages(state["messages"])
+        messages = sanitize_messages_for_model(
+            _library_turn_messages(state["messages"]),
+            mcp_session_id,
+        )
         reservation_intent = _has_library_reservation_intent(_last_human_message_text(messages))
         library_connected = bool(state.get("library_connected"))
         if reservation_intent and not library_connected:
             return {
-                "messages": [AIMessage(content=_LIBRARY_RESERVATION_LOGIN_MESSAGE)],
+                "messages": [
+                    AIMessage(
+                        content=_LIBRARY_RESERVATION_LOGIN_MESSAGE,
+                        name=_LIBRARY_AGENT_NAME,
+                    )
+                ],
                 "active_agent": None,
             }
         if reservation_intent and library_connected and not mcp_session_id:
             return {
-                "messages": [AIMessage(content=_LIBRARY_RESERVATION_SESSION_MESSAGE)],
+                "messages": [
+                    AIMessage(
+                        content=_LIBRARY_RESERVATION_SESSION_MESSAGE,
+                        name=_LIBRARY_AGENT_NAME,
+                    )
+                ],
                 "active_agent": None,
             }
 
-        prompt = _build_library_prompt(mcp_session_id)
+        prompt = _build_library_prompt(bool(mcp_session_id))
         input_messages = sanitize_tool_pairing([SystemMessage(content=prompt), *messages])
+        model_tools = tools_for_model(agent_tools, mcp_session_id)
 
         last_exc: Exception | None = None
         for _llm in llm_seq:
             provider = _provider_label(_llm)
             try:
-                llm_with_tools = _llm.bind_tools(agent_tools)
+                llm_with_tools = _llm.bind_tools(model_tools)
                 history = list(input_messages)
 
                 for _ in range(6):
@@ -560,11 +605,24 @@ def build_library_agent(
                     history.append(response)
 
                     if not response.tool_calls:
+                        if contains_internal_auth_guidance(content_to_text(response.content)):
+                            return {
+                                "messages": [
+                                    AIMessage(
+                                        content=(
+                                            f"[도서관 에이전트] "
+                                            f"{_LIBRARY_RESERVATION_LOGIN_MESSAGE}"
+                                        ),
+                                        name=_LIBRARY_AGENT_NAME,
+                                    )
+                                ],
+                                "active_agent": None,
+                            }
                         break
 
                     hitl_triggered = False
                     for tc in response.tool_calls:
-                        matched = next((t for t in agent_tools if t.name == tc["name"]), None)
+                        matched = next((t for t in model_tools if t.name == tc["name"]), None)
                         if matched is None:
                             history.append(
                                 ToolMessage(
@@ -576,9 +634,17 @@ def build_library_agent(
 
                         try:
                             result = await matched.ainvoke(tc.get("args", {}), config=config)
-                            content = tool_result_to_text(result)
+                            content = sanitize_tool_result_for_model(
+                                tool_result_to_text(result),
+                                mcp_session_id,
+                            )
                         except Exception as tool_exc:
-                            content = f"Tool error: {tool_exc}"
+                            logger.warning(
+                                "library tool %s failed: type=%s",
+                                tc["name"],
+                                type(tool_exc).__name__,
+                            )
+                            content = "Tool error: upstream tool failed."
 
                         history.append(ToolMessage(content=content, tool_call_id=tc.get("id", "")))
 
@@ -586,16 +652,18 @@ def build_library_agent(
                         # AUTH_REQUIRED, return a fixed login-needed message NOW and stop.
                         # The weak free LLM otherwise ignores the result and hallucinates a
                         # successful reservation ("예약되었습니다" with nothing reserved).
-                        if "AUTH_REQUIRED" in content:
-                            login_url = _extract_login_url(content)
+                        if auth_denial_status(content) is not None:
                             notice = (
                                 "좌석 예약·대출 같은 기능은 도서관 로그인(연결)이 필요해요. "
                                 "먼저 도서관에 로그인해 주세요."
                             )
-                            if login_url:
-                                notice += f"\n로그인: {login_url}"
                             return {
-                                "messages": [AIMessage(content=f"[도서관 에이전트] {notice}")],
+                                "messages": [
+                                    AIMessage(
+                                        content=f"[도서관 에이전트] {notice}",
+                                        name=_LIBRARY_AGENT_NAME,
+                                    )
+                                ],
                                 "active_agent": None,
                             }
 
@@ -618,14 +686,16 @@ def build_library_agent(
                     if hitl_triggered:
                         break
 
-                output_messages = history[len(input_messages) :]
+                output_messages = sanitize_messages_for_model(
+                    history[len(input_messages) :],
+                    mcp_session_id,
+                )
                 apply_empty_response_fallback(output_messages)
                 for msg in output_messages:
-                    if (
-                        isinstance(msg, AIMessage)
-                        and content_to_text(msg.content).strip() == EMPTY_RESPONSE_FALLBACK.strip()
-                    ):
-                        msg.id = None
+                    if isinstance(msg, AIMessage):
+                        msg.name = _LIBRARY_AGENT_NAME
+                        if content_to_text(msg.content).strip() == EMPTY_RESPONSE_FALLBACK.strip():
+                            msg.id = None
                 return {"messages": output_messages}
             except Exception as exc:
                 # Log every provider failure — this used to swallow all but the
@@ -633,7 +703,9 @@ def build_library_agent(
                 # (preferred) providers failed when diagnosing quota/schema
                 # errors in prod. Mirrors react_loop.run_react_loop's logging.
                 logger.warning(
-                    "[library] provider=%s failed: %s: %s", provider, type(exc).__name__, exc
+                    "[library] provider=%s failed: type=%s",
+                    provider,
+                    type(exc).__name__,
                 )
                 last_exc = exc
 
@@ -667,7 +739,7 @@ def build_library_agent(
             result = await confirm_tool.ainvoke(
                 {"mcp_session_id": mcp_session_id, "action_id": action["action_id"]}
             )
-            confirm_message = _confirm_result_message(result)
+            confirm_message = _confirm_result_message(result, mcp_session_id)
             final_message = await _follow_reservation_wait_status(
                 confirm_message,
                 result,
@@ -675,9 +747,15 @@ def build_library_agent(
                 mcp_session_id,
                 action.get("details"),
             )
-            msg = AIMessage(content=f"[도서관 에이전트] {final_message}")
+            msg = AIMessage(
+                content=f"[도서관 에이전트] {final_message}",
+                name=_LIBRARY_AGENT_NAME,
+            )
         else:
-            msg = AIMessage(content="[도서관 에이전트] 예약이 취소되었습니다.")
+            msg = AIMessage(
+                content="[도서관 에이전트] 예약이 취소되었습니다.",
+                name=_LIBRARY_AGENT_NAME,
+            )
 
         return {"messages": [msg], "active_agent": None}
 
