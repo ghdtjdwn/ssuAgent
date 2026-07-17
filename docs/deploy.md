@@ -1,143 +1,115 @@
-# ssuAgent Containerization & k3s Deployment Guide
+# ssuAgent GitOps 배포와 운영 검증
 
-이 문서는 ssuAgent의 컨테이너화(Containerization) 및 k3s 클러스터 배포 환경 구축에 대해 다룹니다.
+이 문서는 현재 production 배포 경로와 검증 기준을 설명한다. 요청·신뢰·상태 경계는
+[architecture.md](architecture.md), 환경 변수는 [configuration.md](configuration.md)가 기준이다.
 
-> 요청·신뢰·상태 경계는 [architecture.md](architecture.md), 운영 배포 흐름은 이 문서를 기준으로 한다.
-
-## 배경 (Background)
-
-- **Phase 2 로컬 실행**: 기존에는 로컬 환경에서 `python ssu_agent/main.py` 형태로 직접 프로세스를 띄워 실행하였으며, 대화 상태 보존(HITL interrupt 및 대화 메모리)을 위해 `SqliteSaver`를 사용한 파일 형태의 로컬 DB를 참조했습니다.
-- **문제점**: Kubernetes 배포 시 파드(Pod)가 재시작되면 로컬 파일 시스템에 저장된 SQLite 파일이 유실되어 대화 상태 및 승인 대기 상태가 초기화되는 문제가 있습니다.
-- **Phase 3 목표**: ssuAgent 서비스를 Docker 이미지로 패키징하여 GitHub Container Registry (GHCR)에 푸시하고, k3s 클러스터 내에서 ArgoCD 및 ArgoCD Image Updater를 통해 지속적인 통합/배포(CI/CD)를 구축합니다.
-
----
-
-## 체크포인터 의사결정 (Checkpointer Decision)
-
-LangGraph의 대화 상태를 저장하기 위한 체크포인터로 아래의 대안들을 평가했습니다.
-
-### 대안 비교
-
-1. **후보 A: SqliteSaver (기존)**
-   - **장점**: 별도의 DB 인프라 구축 없이 로컬 파일 형태로 빠르게 구축 가능.
-   - **단점**: 파드 재시작 시 상태가 소멸하므로 Persistent Volume Claim (PVC) 마운트가 필요하며, 멀티 레플리카 환경(ReadWriteOnce 제한)에서 다중 파드 간 SQLite 파일 공유가 불가능합니다.
-   - **결정**: **탈락**
-
-2. **후보 B: langgraph-checkpoint-postgres (채택)**
-   - **장점**: 기존 k3s 클러스터 내 구동 중인 PostgreSQL 데이터베이스(`postgres-service:5432/ssuai`)를 그대로 활용 가능합니다. 파드 재시작 후에도 대화 재개 및 HITL interrupt 영속성이 완벽히 보장되며, 멀티 레플리카 스케일아웃이 자유롭습니다. ACID 트랜잭션을 지원하여 신뢰성이 높습니다.
-   - **결정**: **채택**
-
-### 세부 구현 설정
-
-- **AsyncConnectionPool 사용**: PostgreSQL 연결 효율을 극대화하기 위해 `psycopg_pool`의 `AsyncConnectionPool`을 백엔드로 사용합니다. (`max_size=5` 풀 크기 지정)
-- **autocommit=True 필수**: LangGraph Postgres 체크포인터는 자체적으로 트랜잭션 내에서 `savepoint`를 정의하고 관리하므로, DB 커넥션 풀 초기 설정 시 `autocommit=True`가 강제됩니다.
-- **prepare_threshold=0 설정**: psycopg3의 prepared statement 기능을 비활성화합니다. LangGraph 내부 쿼리 엔진과 prepared statement 캐싱이 충돌을 유발하여 에러가 발생할 수 있기 때문에 안정성을 위해 비활성화 설정을 적용합니다.
-- **migration 자동화**: FastAPI `lifespan` 시작 시 `checkpointer.setup()`이 호출되며 필요한 테이블(`checkpoint_blobs`, `checkpoint_writes` 등)이 없으면 자동으로 생성(마이그레이션)합니다.
-
----
-
-## Docker 멀티스테이지 빌드 (Dockerfile Design)
-
-Oracle Ampere A1 (ARM64 아키텍처) 기반의 k3s 환경을 타겟으로 멀티스테이지 빌드를 설계했습니다.
-
-1. **Stage 1 (Builder)**: `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`
-   - 초고속 Python 패키지 인스톨러인 `uv` 빌더 이미지를 베이스로 삼고, `pyproject.toml` 및 `uv.lock`을 복사해 가상환경(`.venv`)을 구성합니다.
-   - `--no-dev --frozen` 플래그로 락파일의 개발용 의존성을 제외하고 프로덕션 의존성만 고정 설치합니다.
-2. **Stage 2 (Runtime)**: `python:3.12-slim`
-   - 불필요한 빌드 도구와 캐시가 제거된 경량 런타임 이미지입니다.
-   - 1단계 빌더에서 준비된 가상환경(`.venv`)과 `ssu_agent` 소스 코드만 복사하여 최종 이미지 크기를 극대화하여 줄입니다.
-   - 컨테이너 보안을 위해 비루트(non-root) 실행 환경을 권장하도록 구성합니다.
-
----
-
-## GitHub Actions CI 파이프라인 (CI/CD Workflow)
-
-`.github/workflows/ci.yml`을 통해 자동화된 검증 및 이미지 빌드를 수행합니다.
-
-1. **Test Job**:
-   - `ruff check .` 및 `ruff format --check .` 린터 검사 수행.
-   - `pytest`를 통한 단위 테스트 검증.
-2. **Docker Job (needs: test)**:
-   - `main` 브랜치에 푸시되었을 때만 실행됩니다.
-   - `setup-qemu-action` 및 `setup-buildx-action`을 사용하여 `linux/arm64` 멀티플랫폼 이미지 크로스컴파일을 지원합니다.
-   - GitHub Token을 기반으로 GHCR에 로그인한 후, `ghcr.io/ghdtjdwn/ssuagent:sha-<commit_sha>` 태그로 빌드 및 푸시합니다.
-   - `type=gha` 캐시를 활용하여 레이어 캐싱으로 빌드 시간을 획기적으로 단축합니다.
-
----
-
-## ArgoCD Image Updater 배포 파이프라인
-
-k3s 클러스터 내 ArgoCD가 아래와 같이 ssuAgent 서비스를 자동 동기화 및 롤아웃합니다.
+## 배포 계약
 
 ```mermaid
-graph TD
-    A[Local Code Push] -->|Git Commit| B(GitHub Repository)
-    B -->|Trigger CI/CD| C[GitHub Actions]
-    C -->|Ruff & Pytest| D{Tests Pass?}
-    D -->|Yes| E[Build & Push Docker Image]
-    E -->|ghcr.io/ghdtjdwn/ssuagent:sha-hash| F(GitHub Container Registry)
-    F -->|Detect New Build Tag| G[ArgoCD Image Updater]
-    G -->|Write Back git: image.tag| B
-    B -->|Webhook Trigger| H[ArgoCD Sync]
-    H -->|Helm Apply| I[k3s Cluster ssuai-prod]
+flowchart LR
+    A[main push] --> B[Ruff + format + pytest]
+    B --> C[ARM64 image build]
+    C --> D[GHCR sha tag]
+    D --> E[ArgoCD Image Updater]
+    E --> F[values.yaml write-back]
+    F --> G[ArgoCD auto-sync]
+    G --> H[k3s rollout]
 ```
 
-1. **태그 감지**: ArgoCD Image Updater가 `newest-build` 전략을 바탕으로 `sha-<hash>` 정규식 태그 형태의 최신 이미지를 주기적으로 감지합니다.
-2. **Write-back**: 이미지 업데이트가 확인되면, ssuAgent 레포지토리의 `deploy/charts/ssu-agent/values.yaml` 내 `image.tag` 값을 새 커밋 해시로 자동 커밋 및 푸시(`write-back`)합니다.
-3. **Helm 배포**: ArgoCD가 values.yaml의 변경점을 인식하고 동기화(Sync)를 수행하여 k3s 클러스터에 Rolling Update 배포를 수행합니다.
+1. `.github/workflows/ci.yml`이 Ruff, format check와 pytest를 실행한다.
+2. 검증이 성공한 `main` SHA만 `ghcr.io/ghdtjdwn/ssuagent:sha-<full-sha>` ARM64 이미지로
+   publish된다.
+3. ArgoCD Image Updater가 새 SHA tag를 감지해
+   `deploy/charts/ssu-agent/values.yaml`의 `image.tag`를 Git에 write-back한다.
+4. ArgoCD가 Helm chart를 `ssuai-prod` namespace에 auto-sync하고 rolling update한다.
 
-### 2026-07-15 trust-boundary rollout verification
+이미지 publish 성공은 배포 완료를 의미하지 않는다. write-back, ArgoCD reconciliation, 실제 running
+image와 health를 모두 확인해야 한다.
 
-`498ddb0`의 main CI와 ARM64 image push는 성공했지만 production은 이전
-image에 남아 있었다. Git의 Application manifest는 현재 GitHub owner인
-`ghdtjdwn`을 가리켰지만, cluster에 실행 중인 Application은 이전 owner인
-`hoeongj`의 repository와 GHCR image annotation을 유지했다. 그 결과 Image
-Updater가 매 주기 이미지를 `skipped` 처리했고, ArgoCD의 `Synced/Healthy`는
-원하는 image가 실행 중이라는 증거가 아니었다.
+## Source of truth
 
-version-controlled `deploy/argocd/application-ssu-agent.yaml`을 다시 적용해
-live drift를 해소했다. Image Updater는 `sha-498ddb0...`를 `values.yaml`에
-write-back했고 ArgoCD가 rolling update를 완료했다. 최종 검증은 다음 순서로
-수행했다.
+| 대상 | 기준 파일 또는 상태 |
+| --- | --- |
+| CI와 image gate | `.github/workflows/ci.yml` |
+| Kubernetes workload | `deploy/charts/ssu-agent/` |
+| 원하는 image SHA | `deploy/charts/ssu-agent/values.yaml` |
+| ArgoCD source와 Image Updater annotation | `deploy/argocd/application-ssu-agent.yaml` |
+| Secret 이름과 필수 여부 | Helm `secretRef`와 production values |
+| 실제 배포 결과 | ArgoCD status, Deployment rollout, running pod image, health endpoints |
 
-1. main CI test와 ARM64 image push 성공
-2. Image Updater의 managed image 수와 write-back commit 확인
-3. ArgoCD `Synced/Healthy`와 실제 running image SHA 확인
-4. Deployment `1/1 Ready`, pod restart 0 확인
-5. `/health`와 `/healthz/deep`의 `UP` 확인
-6. direct no-key `/agent/stream`은 401, ssuAI server proxy 경유 invalid body는
-   422 확인
+## Runtime 경계
 
-배포 검증 시 Application 상태만 보지 말고 source repository, image-list
-annotation, chart tag, running pod image를 함께 대조한다. live Application drift는
-수동 image 교체나 pod restart 대신 version-controlled manifest 재적용으로
-복구해 GitOps source of truth를 유지한다.
+- production target은 ARM64 k3s와 `ssuai-prod` namespace다.
+- LangGraph checkpoint와 thread owner는 기존 PostgreSQL에 저장한다. pod filesystem은 대화 상태의
+  source of truth가 아니다.
+- `ssuagent-secrets`는 최소 `DATABASE_URL`, `AGENT_API_KEY`, 한 개 이상의 LLM provider key를
+  포함한다. 값은 Git에 두지 않는다.
+- production은 `AGENT_API_KEY_REQUIRED=true`, 실제 frontend origin allow-list, non-optional Secret을
+  사용한다.
+- readiness/liveness는 `/health`, upstream MCP까지 포함한 운영 점검은 `/healthz/deep`을 사용한다.
 
----
+Secret key 이름과 선택 provider는 Helm의
+[`secret.example.yaml`](../deploy/charts/ssu-agent/templates/secret.example.yaml)을 참고한다. 실제 값을
+명령 기록, CI log, issue나 문서에 붙여 넣지 않는다.
 
-## k3s 클러스터 수동 설정 사항 (Manual Setup)
+## Release 검증
 
-배포 전, 클러스터 어드민이 수동으로 세팅해야 하는 인프라 항목입니다.
+다음 순서로 같은 commit SHA를 끝까지 추적한다.
 
-### 1. Kubernetes Secret 생성
-파드 구동에 절대적으로 필요한 API Key와 데이터베이스 접속용 DSN은 보안을 위해 Secret 객체로 분리하여 관리하며, Helm Chart는 이를 환경변수(`envFrom`)로 주입받습니다.
+1. `main` CI의 test job 성공
+2. 같은 SHA의 ARM64 image build/push 성공
+3. Image Updater가 `values.yaml`에 기록한 tag 확인
+4. ArgoCD Application의 source repository와 `Synced/Healthy` 확인
+5. Deployment rollout 완료와 pod `Ready`, restart count 확인
+6. running container image가 기대한 SHA tag인지 확인
+7. `/health`와 `/healthz/deep`이 `UP`인지 확인
+8. direct no-key `/agent/stream`이 401이고, ssuAI server proxy 경로가 계약에 맞는 상태 코드를
+   반환하는지 확인
 
-```bash
-kubectl create secret generic ssuagent-secrets \
-  --namespace ssuai-prod \
-  --from-literal=GOOGLE_API_KEY="your-gemini-api-key" \
-  --from-literal=AGENT_API_KEY="use-the-same-random-value-as-ssuAI" \
-  --from-literal=DATABASE_URL="postgresql://ssuai:your-db-password@postgres-service:5432/ssuai"
-```
-*주의: `DATABASE_URL` 내의 DB 패스워드는 `ssuai-backend-secrets`에 설정된 `SSUAI_DB_PASSWORD` 값과 일치해야 합니다.*
+문서-only 변경은 CI의 `paths-ignore` 대상이므로 새 image나 rollout이 생기지 않는 것이 정상이다.
 
-추가 선택 키 — 같은 Secret에 `--from-literal`로 추가하면 Deployment의 `envFrom`이 자동 주입합니다(차트 수정 불필요):
+## Rollback
 
-| 키 | 역할 |
-|---|---|
-| `GROQ_API_KEY` | LLM 폴백 1순위(Groq llama-3.3-70b-versatile). 미설정 시 해당 프로바이더는 폴백 체인에서 제외됩니다(ADR 004 갱신 참조). |
-| `OPENROUTER_API_KEY` | LLM 폴백 3순위(OpenRouter catch-all). 미설정 시 체인에서 제외. |
+정상 rollback은 cluster에서 image를 직접 바꾸는 작업이 아니라, `values.yaml`의 image tag를 마지막으로
+검증된 SHA로 되돌리는 Git commit이다. ArgoCD가 이 Git 상태로 reconciliation하게 한다.
 
-### 2. DNS A 레코드 등록
-`ssuagent.duckdns.org` 도메인 명의 트래픽이 k3s 트래픽을 처리하는 Public Gateway IP(`168.110.104.199`)로 도달할 수 있도록 DuckDNS 혹은 해당 네임서버에 A 레코드를 매핑해야 합니다.
-Ingress 컨트롤러(Traefik)는 이 호스트 요청을 감지하고, `letsencrypt-prod` ClusterIssuer를 통해 자동으로 TLS 인증서를 갱신 및 오프로딩합니다.
+ArgoCD나 Image Updater 자체가 고장 난 break-glass 상황에서는 먼저 auto-sync 영향과 현재 serving pod를
+확인한다. production pod restart, 강제 replace, 수동 image patch는 별도 승인과 rollback 계획 없이
+실행하지 않는다. 복구 후에는 반드시 version-controlled manifest와 live Application의 drift를 없앤다.
+
+## 현재 운영 제약
+
+- replica는 1개다. process-local rate limit 때문에 무검증 scale-out은 사용자별 quota를 보장하지 못한다.
+- PostgreSQL checkpointer는 pod 재시작 후 대화를 보존하지만, schema/setup과 connection pool 상태도
+  readiness와 별도로 확인해야 한다.
+- `/health`는 process liveness에 가깝다. MCP 연결을 포함한 종단 준비 상태는 `/healthz/deep`이 더 강한
+  근거다.
+- Secret과 Vercel proxy wiring은 repository CI가 검증하지 못한다.
+
+## 운영 사례: ArgoCD Application drift
+
+### 상황과 영향
+
+2026-07-15, commit `498ddb0`의 CI와 ARM64 image publish는 성공했지만 production은 이전 image를 계속
+실행했다. ArgoCD는 `Synced/Healthy`였기 때문에 표면 상태만 보면 정상 배포처럼 보였다. 기존 Ready pod가
+계속 serving해 외부 중단은 없었지만, 새 코드가 배포되지 않은 상태였다.
+
+### 증거와 원인
+
+- Git의 Application manifest는 현재 owner `ghdtjdwn`의 repository와 GHCR image를 가리켰다.
+- cluster에 남은 live Application은 이전 owner의 repository와 image-list annotation을 유지했다.
+- Image Updater log는 해당 image를 반복해서 `skipped` 처리했고 `values.yaml` write-back이 없었다.
+- 따라서 `Synced/Healthy`는 stale source와 일치한다는 뜻이었을 뿐, 기대한 SHA가 실행 중이라는 근거가
+  아니었다.
+
+root cause는 version-controlled Application과 live ArgoCD Application 사이의 control-plane drift였다.
+수동 `kubectl set image`나 pod restart는 GitOps source of truth를 더 흐리므로 해결책에서 제외했다.
+
+### 해결과 검증
+
+version-controlled `deploy/argocd/application-ssu-agent.yaml`을 재적용해 source repository와 Image
+Updater annotation을 복구했다. 이후 Image Updater write-back, ArgoCD rolling update, running image
+SHA, `1/1 Ready`, restart 0, `/health`, `/healthz/deep`, no-key 401을 순서대로 확인했다.
+
+회귀 방지를 위해 release 검증에서 ArgoCD 상태만 보지 않고 source URL, image-list annotation, chart
+tag와 running image SHA를 함께 대조한다.

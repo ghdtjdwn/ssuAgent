@@ -4,4 +4,5 @@
 #   kubectl create secret generic ssuagent-secrets \
 #     --namespace ssuai-prod \
 #     --from-literal=GOOGLE_API_KEY=<key> \
+#     --from-literal=AGENT_API_KEY=<same-random-value-as-ssuAI> \
 #     --from-literal=DATABASE_URL="postgresql://ssuai:<password>@postgres-service:5432/ssuai"

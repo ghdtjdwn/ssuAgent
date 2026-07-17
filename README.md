@@ -1,108 +1,107 @@
 # ssuAgent
 
 [![CI](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/ci.yml)
+[![Security](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/security.yml/badge.svg)](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/security.yml)
 
-> 🇺🇸 English version: [README.en.md](README.en.md)
+**한국어** · [English](README.en.md)
 
-> 🧩 **숭실대 캠퍼스 AI 플랫폼** (4-서비스 중 하나) · [ssuMCP](https://github.com/ghdtjdwn/ssuMCP) · [ssuAI](https://github.com/ghdtjdwn/ssuAI) · **ssuAgent** · [ssu-ai-service](https://github.com/ghdtjdwn/ssu-ai-service) · 🟢 [Live](https://ssuai.vercel.app)
+ssuAI의 자연어 요청을 도메인별 MCP 도구로 라우팅하고, 대화 상태·SSE 스트림·사용자 승인 흐름을
+관리하는 FastAPI/LangGraph 오케스트레이션 서비스다.
 
-숭실대학교 MCP 서버([ssuMCP](https://github.com/ghdtjdwn/ssuMCP))에 연결하는 LangGraph 기반 **멀티에이전트** 캠퍼스 AI 에이전트. [ssuAI](https://github.com/ghdtjdwn/ssuAI) 웹 채팅 UI에 SSE 스트리밍으로 연동된다.
+[라이브 챗봇](https://ssuai.vercel.app/chat) ·
+[플랫폼 사례 연구](https://seongju.vercel.app/projects/ssu-platform/) · [문서 지도](docs/README.md)
 
-🟢 **Live** — 챗봇에서 바로 사용: <https://ssuai.vercel.app/chat> (이 에이전트가 SSE로 응답)
+## 플랫폼에서 맡는 역할
 
-## Architecture
+| 서비스 | 책임 | 저장소 |
+| --- | --- | --- |
+| ssuAI | 사용자 화면, same-origin BFF, 인증 상태와 SSE/HITL UX | [ghdtjdwn/ssuAI](https://github.com/ghdtjdwn/ssuAI) |
+| **ssuAgent** | **의도 라우팅, 도구 조합, 대화 checkpoint, HITL 오케스트레이션** | 현재 저장소 |
+| ssuMCP | 캠퍼스 도메인 로직, MCP/REST 계약, 인증과 상태 변경 | [ghdtjdwn/ssuMCP](https://github.com/ghdtjdwn/ssuMCP) |
+| ssu-ai-service | 격리된 임베딩 요청 게이트웨이 | [ghdtjdwn/ssu-ai-service](https://github.com/ghdtjdwn/ssu-ai-service) |
+
+이 서비스는 학교 시스템을 직접 호출하지 않는다. 도메인 기능은 MCP로만 소비하며, 브라우저 인증은
+ssuAI BFF가 검증한 뒤 최소한의 principal과 MCP session context만 전달한다.
+
+## 아키텍처
 
 ![ssuAgent 오케스트레이션 아키텍처 — 신뢰 경계, LangGraph 라우팅, 체크포인트, MCP와 LLM 폴백](docs/assets/architecture.svg)
 
-- **멀티 프로바이더 LLM 폴백**: `llm_factory.get_llm_sequence()`는 설정된 provider만 Anthropic(선택) → Groq → Gemini → OpenRouter 순서로 구성해 단일 장애점을 줄인다. 키가 하나도 없으면 `create_llm()`이 명확한 `RuntimeError`를 던진다. Groq는 `ChatOpenAI` 대신 `ChatGroq`를 사용해 tool-call turn의 content 직렬화 차이를 흡수한다.
-- **상태 영속화**: LangGraph Postgres checkpointer로 대화 상태를 저장한다.
-- **대화 소유권 바인딩**: 인증된 요청은 ssuAI 프록시가 검증한 stable principal의 SHA-256 해시에 `thread_id`를 묶는다. 같은 사용자는 재로그인·멀티기기에서도 checkpoint를 이어가고, 다른 principal은 읽기·resume이 거부된다. 기존 세션 소유 thread는 정당한 세션이 principal을 처음 제시할 때 lazy migration된다.
-- **HITL 안전장치**: 도서관 write action은 `prepare_*` → 사용자 승인 → `confirm_action` 2단계로만 실행된다.
+```text
+browser
+  → ssuAI same-origin agent proxy
+  → FastAPI stream/resume boundary
+  → LangGraph supervisor
+  → academic · library · LMS specialist
+  → ssuMCP tools over Streamable HTTP
+```
 
-요청·신뢰 경계, graph state, HITL 재개, 단일 replica 운영 제약은 [상세 아키텍처 문서](docs/architecture.md)에 정리했다. 이미지의 [PNG 버전](docs/assets/architecture.png)도 함께 제공한다.
+- Supervisor는 현재 사용자 turn을 도메인 specialist로 라우팅하고, specialist는 필요한 MCP 도구만
+  동적으로 로드한다.
+- LangGraph PostgreSQL checkpointer가 대화와 interrupt 상태를 저장한다. 검증된 principal의 hash와
+  `thread_id`를 결합해 다른 사용자의 checkpoint 읽기·resume을 차단한다.
+- 도서관 write는 `prepare_*` 결과에서 graph를 interrupt하고, ssuAI의 명시적 승인 이후에만
+  `confirm_action`으로 재개한다.
+- 설정된 provider만 Anthropic → Groq → Gemini → OpenRouter 순서로 시도한다. 각 agent의 수동
+  `bind_tools` loop가 provider별 tool-call 차이와 fallback을 통제한다.
 
-### 주요 구성요소
+요청·신뢰·상태 경계와 현재 단일 replica 제약은 [아키텍처 문서](docs/architecture.md)에 정리했다.
 
-| 구성요소 | 파일 | 역할 |
-|---|---|---|
-| Supervisor | `supervisor/graph.py` | LangChain `create_agent`로 질문을 분류하고 `ROUTE_TO:X` 마커로 도메인을 라우팅한다. 라우팅 도구가 마커 문자열을 반환하면 `post_supervisor` 노드가 스캔해 `Command(goto=X)`를 낸다(ADR 0001). |
-| 도메인 에이전트 | `agents/{academic,library,lms}.py` | 도메인별 MCP 도구 묶음 + 수동 `bind_tools` 폴백 루프(프로바이더 장애점 제거) |
-| MCP 클라이언트 | `mcp_client.py` | ssuMCP에 Streamable HTTP(MCP 2025-03-26)로 연결, 도구 동적 로드 |
-| LLM 팩토리 | `llm_factory.py` | `get_llm_sequence()` — Anthropic(선택)→Groq→Gemini→OpenRouter 우선순위 폴백 |
-| 체크포인터 | LangGraph Postgres | 대화 상태(turn 간) 영속 |
+## 엔지니어링 근거
 
-## Why LangGraph?
+| 문제 | 구현과 검증 근거 |
+| --- | --- |
+| 다른 사용자가 기존 대화를 resume할 위험 | stable principal hash와 thread owner binding — [ADR 0010](docs/adr/0010-agent-thread-ownership-binding.md) · [security tests](tests/test_main_security.py) |
+| stream 재연결 또는 interrupt 뒤 resume 계약 오류 | stable thread와 명시적 `resume` event ordering — [stream contract tests](tests/test_stream_interrupt.py) |
+| 명확한 LMS export가 추가 LLM turn에서 timeout되는 문제 | 보수적 직접 라우팅과 결정적 링크 생성 — [ADR 0022](docs/adr/0022-deterministic-lms-export-download.md) · [LMS tests](tests/test_lms_agent.py) |
+| provider별 tool-call 형식 차이와 장애 전파 | 설정 기반 provider sequence와 agent-local fallback — [factory tests](tests/test_llm_factory.py) · [ADR 0004](docs/adr/004-multi-provider-llm-fallback.md) |
+| handoff가 답변을 중복하거나 잘못된 도구를 고르는 문제 | routing/safety 평가 세트 — [routing eval](tests/test_eval_routing.py) · [safety eval](tests/test_eval_safety.py) |
+| 검증되지 않은 이미지의 자동 배포 | Ruff·format·pytest 뒤 ARM64 image publish — [CI workflow](.github/workflows/ci.yml) · [deployment guide](docs/deploy.md) |
 
-| 방식 | 이유 |
-|------|------|
-| LangChain LCEL | 단순 체인에 적합. 상태·루프·분기 표현 어려움 |
-| 직접 function calling | 오케스트레이션 코드 직접 관리. 멀티스텝 복잡도 증가 |
-| **LangGraph** (채택) | StateGraph로 상태·분기·루프를 명시적 그래프로 표현. Phase 2 멀티에이전트 확장 용이 |
+주요 스택은 Python 3.12, FastAPI, LangGraph, LangChain, PostgreSQL checkpointer, MCP Streamable
+HTTP, SSE, uv, Ruff, pytest, Docker, Helm과 ArgoCD다.
 
-## Setup
+## 로컬 실행과 검증
+
+PostgreSQL과 한 개 이상의 LLM provider key가 필요하다. 실제 값은 `.env`에만 두고 커밋하지 않는다.
 
 ```bash
-pip install uv
+git clone https://github.com/ghdtjdwn/ssuAgent.git
+cd ssuAgent
+cp .env.example .env
+set -a && source .env && set +a
+
 uv sync --extra dev
-```
-
-## Run
-
-최소 하나의 LLM 프로바이더 키가 필요하다(아래 중 하나면 충분, 여러 개를 설정하면 폴백 순서대로 사용):
-
-```bash
-export ANTHROPIC_API_KEY=<your-claude-key> # 선택 시 1순위
-export GROQ_API_KEY=<your-groq-key>        # 무료 체인 1순위
-export GOOGLE_API_KEY=<your-gemini-key>    # 무료 체인 2순위
-export OPENROUTER_API_KEY=<your-or-key>    # 무료 체인 3순위
-export SSUMCP_URL=https://ssumcp.duckdns.org/mcp  # optional, this is the default
-# FastAPI 앱 실행 (SSE 스트리밍 엔드포인트)
 uv run uvicorn ssu_agent.main:app --host 0.0.0.0 --port 8000
-
-# 다른 터미널에서 로컬 호출 (키 게이트를 켰다면 -H "X-Agent-Key: <key>" 추가)
-curl -N -X POST http://localhost:8000/agent/stream \
-  -H "Content-Type: application/json" \
-  -d '{"message": "오늘 학식 알려줘"}'
 ```
 
-## Security / configuration
-
-주요 런타임 환경변수의 코드 기본값은 로컬 개발용이다. 운영 Helm은 `AGENT_API_KEY_REQUIRED=true`와 non-optional Secret을 사용한다.
-
-| 환경변수 | 기본값 | 역할 |
-|---|---|---|
-| `ALLOWED_ORIGINS` | `*` (전체 허용) | CORS allow-list. 콤마로 구분한 origin 목록(`config.py`에서 파싱 → `main.py` `CORSMiddleware`). 단일 `*`이면 기존처럼 전체 허용. 실제 프론트엔드 origin으로 좁히면 CORS 보호가 활성화된다. |
-| `AGENT_API_KEY` | 비어 있음(로컬 게이트 off) | `/agent/*`의 `X-Agent-Key` 자격증명. 운영에서는 필수이며 ssuAI 서버 프록시의 값과 일치해야 한다. 설정하면 `secrets.compare_digest`로 검증하고 없거나 틀리면 401을 반환한다. |
-| `AGENT_API_KEY_REQUIRED` | `false` | `true`인데 `AGENT_API_KEY`가 비어 있으면 시작을 거부한다. 운영 값은 `true`이고 로컬 개발에서만 `false`를 허용한다. |
-| `AGENT_RATE_LIMIT` | `30/minute` | `/agent/stream`·`/agent/resume`의 process-local 인바운드 rate limit. 현재 ssuAI proxy는 browser IP를 전달하지 않아 운영 key는 실제 사용자보다 Vercel egress 경계에 가깝다. 초과 시 429이며, 사용자별 quota나 scale-out에는 trusted client identity/IP 전달과 shared store가 필요하다. |
-| `AGENT_MAX_MESSAGE_CHARS` | `8000` | 단일 요청 `message`의 최대 문자 수(pydantic `Field(max_length=…)`). 초과 시 422(oversized-payload 가드, ADR 0009). |
-| LLM 키 | — | `ANTHROPIC_API_KEY`/`GROQ_API_KEY`/`GOOGLE_API_KEY`/`OPENROUTER_API_KEY` 중 설정된 것만 폴백 시퀀스에 포함(위 Architecture 참조). |
-| `ANTHROPIC_MODEL` | `claude-haiku-4-5` | Anthropic provider가 사용할 모델명(`ANTHROPIC_API_KEY` 설정 시에만 사용). |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini 프로바이더가 사용할 모델명(`llm_factory.py`, `GOOGLE_API_KEY` 설정 시에만 사용). |
-
-### Thread ownership binding
-
-`/agent/stream`과 `/agent/resume`은 그래프 실행 전에 `thread_owners`를 확인한다. 로그인 요청의 `principal`은 브라우저가 주장한 값이 아니라 ssuAI 서버 프록시가 access JWT를 검증해 주입한 stable subject다. ssuAgent는 원문 대신 `sha256(principal)`을 `owner_kind='principal'`로 저장한다. 같은 principal은 세션이 회전하거나 기기가 달라도 같은 thread를 사용할 수 있고, 다른 principal이나 principal이 누락된 요청은 403을 받는다.
-
-이전 세션 기반 행(`owner_kind='session'` 또는 legacy `NULL`)은 저장된 `mcp_session_id`와 일치하는 정당한 요청이 검증된 principal을 처음 제시할 때 한 번만 principal 소유로 승격된다. owner row가 없는 오래된 checkpoint는 첫 검증 요청이 claim한다. Authorization이 없는 익명 호출만 기존 session/anonymous 폴백을 사용한다. 자세한 계약은 `docs/adr/0010-agent-thread-ownership-binding.md`와 `docs/adr/0011-thread-stable-principal-binding.md`를 참조한다.
-
-### `/agent` 엔드포인트 인증
-
-운영 `/agent/*`는 API 키 게이트로 보호된다. `AGENT_API_KEY_REQUIRED=true`이므로 키가 없는 배포는 시작하지 않으며, ssuAgent는 `AGENT_API_KEY`와 일치하는 `X-Agent-Key`를 강제한다(`main.py`의 `verify_agent_key`, 불일치 시 401). ssuAI 서버 전용 proxy가 키를 주입하고 검증한 principal만 전달한다. 브라우저는 same-origin `/api/agent/*`만 호출하므로 키와 신뢰된 principal을 직접 제어할 수 없다. 설계 배경과 검증 절차는 `docs/adr/0009-agent-edge-hardening.md`를 참조한다.
-
-## Test
-
 ```bash
+uv run ruff check .
+uv run ruff format --check .
 uv run pytest
 ```
 
-## Phase Roadmap
+환경 변수의 보안 의미와 운영 차이는 [설정 문서](docs/configuration.md)에 있다.
 
-| Phase | 범위 | 상태 |
-|-------|------|------|
-| 1 | ReAct 단일 에이전트, 공개 도구 3종 (식단/도서관/공지) | ✅ 완료 |
-| 2 | 도메인별 supervisor 멀티에이전트, 도서관 예약 인증 도구(HITL), 스트리밍 응답 | ✅ 완료 |
-| 3 | ssuAI 프론트엔드 연동 (웹 UI 채팅, SSE) | ✅ 완료 |
-| 보안 하드닝 | LLM 프로바이더 키 가드, env 기반 CORS(`ALLOWED_ORIGINS`), `/agent` API 키 게이트(`AGENT_API_KEY`), thread ownership binding | ✅ 완료 |
+## 문서
 
-> 구현 메모: 기존 `create_react_agent` executor에서 확인된 루핑 이슈 때문에 도메인 에이전트는 수동 `bind_tools` 폴백 루프를 유지한다(단일 프로바이더 장애점 제거). Supervisor는 지원되는 `langchain.agents.create_agent` API를 사용한다. 근거·대안은 `docs/adr/` 참조.
+- [문서 지도](docs/README.md)
+- [아키텍처와 신뢰 경계](docs/architecture.md)
+- [설정과 환경 변수](docs/configuration.md)
+- [GitOps 배포와 운영 검증](docs/deploy.md)
+- [ADR 목록](docs/adr/)
+
+## 범위와 제약
+
+- 현재 production은 단일 replica이고 inbound rate limit은 process-local이다. scale-out 전에 shared
+  limiter와 checkpoint 동시성 검증이 필요하다.
+- CI의 stream/HITL 단위 테스트는 `MemorySaver`를 사용한다. 실제 PostgreSQL을 재시작한 뒤 resume하는
+  container integration test는 현재 gate에 포함되지 않는다.
+- LLM과 학교 시스템의 가용성에 의존한다. 도구 실패 시 응답을 추측하지 않고 제한이나 연결 필요 상태를
+  반환한다.
+- 직접 `/agent/*` 호출은 운영에서 server-to-server API key가 필요하며, 공개 사용자는 ssuAI를 통해
+  접근한다.
+
+## 라이선스
+
+[MIT](LICENSE)
