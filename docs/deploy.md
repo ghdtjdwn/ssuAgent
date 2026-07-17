@@ -2,6 +2,8 @@
 
 이 문서는 ssuAgent의 컨테이너화(Containerization) 및 k3s 클러스터 배포 환경 구축에 대해 다룹니다.
 
+> 요청·신뢰·상태 경계는 [architecture.md](architecture.md), 운영 배포 흐름은 이 문서를 기준으로 한다.
+
 ## 배경 (Background)
 
 - **Phase 2 로컬 실행**: 기존에는 로컬 환경에서 `python ssu_agent/main.py` 형태로 직접 프로세스를 띄워 실행하였으며, 대화 상태 보존(HITL interrupt 및 대화 메모리)을 위해 `SqliteSaver`를 사용한 파일 형태의 로컬 DB를 참조했습니다.
