@@ -12,26 +12,14 @@
 
 ## Architecture
 
-```
-User Query
-    │
-    ▼
-Supervisor (LangGraph StateGraph) ── 질문 분류 → 도메인 라우팅
-    ├── academic agent   (학사/성적/졸업/장학)
-    ├── library agent    (좌석 추천·예약, prepare/confirm HITL)
-    └── lms agent        (강의/과제/자료 내보내기)
-    │  Streamable HTTP (MCP 2025-03-26)
-    ▼
-ssuMCP Server (Spring Boot 4)
-    ├── Pyxis (도서관)
-    ├── u-SAINT (학사/성적)
-    └── LMS (강의/과제)
-```
+![ssuAgent 오케스트레이션 아키텍처 — 신뢰 경계, LangGraph 라우팅, 체크포인트, MCP와 LLM 폴백](docs/assets/architecture.svg)
 
-- **멀티 프로바이더 LLM 폴백**: `llm_factory.get_llm_sequence()`가 Groq(llama-3.3-70b, 무료 14,400 req/day) → Gemini → OpenRouter 순으로 폴백(단일 장애점 제거). 각 프로바이더는 해당 API 키가 설정된 경우에만 시퀀스에 추가된다 — Groq는 `GROQ_API_KEY`, Gemini는 `GOOGLE_API_KEY`, OpenRouter는 `OPENROUTER_API_KEY`. 키가 하나도 없으면 `create_llm()`이 명확한 `RuntimeError`를 던진다(조용한 오작동 방지). Groq는 `ChatOpenAI` 래퍼 대신 `ChatGroq`를 쓴다 — 제네릭 래퍼가 assistant content를 list로 직렬화해 2번째 tool call에서 Groq가 400을 내기 때문.
+- **멀티 프로바이더 LLM 폴백**: `llm_factory.get_llm_sequence()`는 설정된 provider만 Anthropic(선택) → Groq → Gemini → OpenRouter 순서로 구성해 단일 장애점을 줄인다. 키가 하나도 없으면 `create_llm()`이 명확한 `RuntimeError`를 던진다. Groq는 `ChatOpenAI` 대신 `ChatGroq`를 사용해 tool-call turn의 content 직렬화 차이를 흡수한다.
 - **상태 영속화**: LangGraph Postgres checkpointer로 대화 상태를 저장한다.
 - **대화 소유권 바인딩**: 인증된 요청은 ssuAI 프록시가 검증한 stable principal의 SHA-256 해시에 `thread_id`를 묶는다. 같은 사용자는 재로그인·멀티기기에서도 checkpoint를 이어가고, 다른 principal은 읽기·resume이 거부된다. 기존 세션 소유 thread는 정당한 세션이 principal을 처음 제시할 때 lazy migration된다.
 - **HITL 안전장치**: 도서관 write action은 `prepare_*` → 사용자 승인 → `confirm_action` 2단계로만 실행된다.
+
+요청·신뢰 경계, graph state, HITL 재개, 단일 replica 운영 제약은 [상세 아키텍처 문서](docs/architecture.md)에 정리했다. 이미지의 [PNG 버전](docs/assets/architecture.png)도 함께 제공한다.
 
 ### 주요 구성요소
 
@@ -40,7 +28,7 @@ ssuMCP Server (Spring Boot 4)
 | Supervisor | `supervisor/graph.py` | LangChain `create_agent`로 질문을 분류하고 `ROUTE_TO:X` 마커로 도메인을 라우팅한다. 라우팅 도구가 마커 문자열을 반환하면 `post_supervisor` 노드가 스캔해 `Command(goto=X)`를 낸다(ADR 0001). |
 | 도메인 에이전트 | `agents/{academic,library,lms}.py` | 도메인별 MCP 도구 묶음 + 수동 `bind_tools` 폴백 루프(프로바이더 장애점 제거) |
 | MCP 클라이언트 | `mcp_client.py` | ssuMCP에 Streamable HTTP(MCP 2025-03-26)로 연결, 도구 동적 로드 |
-| LLM 팩토리 | `llm_factory.py` | `get_llm_sequence()` — Groq→Gemini→OpenRouter 우선순위 폴백 |
+| LLM 팩토리 | `llm_factory.py` | `get_llm_sequence()` — Anthropic(선택)→Groq→Gemini→OpenRouter 우선순위 폴백 |
 | 체크포인터 | LangGraph Postgres | 대화 상태(turn 간) 영속 |
 
 ## Why LangGraph?
@@ -60,12 +48,13 @@ uv sync --extra dev
 
 ## Run
 
-최소 하나의 LLM 프로바이더 키가 필요하다(아래 중 하나면 충분, 셋 다 설정하면 폴백 순서대로 사용):
+최소 하나의 LLM 프로바이더 키가 필요하다(아래 중 하나면 충분, 여러 개를 설정하면 폴백 순서대로 사용):
 
 ```bash
-export GROQ_API_KEY=<your-groq-key>        # 1순위(선택)
-export GOOGLE_API_KEY=<your-gemini-key>    # 2순위(선택)
-export OPENROUTER_API_KEY=<your-or-key>    # 3순위(선택)
+export ANTHROPIC_API_KEY=<your-claude-key> # 선택 시 1순위
+export GROQ_API_KEY=<your-groq-key>        # 무료 체인 1순위
+export GOOGLE_API_KEY=<your-gemini-key>    # 무료 체인 2순위
+export OPENROUTER_API_KEY=<your-or-key>    # 무료 체인 3순위
 export SSUMCP_URL=https://ssumcp.duckdns.org/mcp  # optional, this is the default
 # FastAPI 앱 실행 (SSE 스트리밍 엔드포인트)
 uv run uvicorn ssu_agent.main:app --host 0.0.0.0 --port 8000
@@ -85,9 +74,10 @@ curl -N -X POST http://localhost:8000/agent/stream \
 | `ALLOWED_ORIGINS` | `*` (전체 허용) | CORS allow-list. 콤마로 구분한 origin 목록(`config.py`에서 파싱 → `main.py` `CORSMiddleware`). 단일 `*`이면 기존처럼 전체 허용. 실제 프론트엔드 origin으로 좁히면 CORS 보호가 활성화된다. |
 | `AGENT_API_KEY` | 비어 있음(로컬 게이트 off) | `/agent/*`의 `X-Agent-Key` 자격증명. 운영에서는 필수이며 ssuAI 서버 프록시의 값과 일치해야 한다. 설정하면 `secrets.compare_digest`로 검증하고 없거나 틀리면 401을 반환한다. |
 | `AGENT_API_KEY_REQUIRED` | `false` | `true`인데 `AGENT_API_KEY`가 비어 있으면 시작을 거부한다. 운영 값은 `true`이고 로컬 개발에서만 `false`를 허용한다. |
-| `AGENT_RATE_LIMIT` | `30/minute` | `/agent/stream`·`/agent/resume`의 per-IP 인바운드 rate limit(slowapi 문법, `main.py`의 `limiter`). 키는 X-Forwarded-For 좌측 홉(ingress 뒤 실클라이언트 IP). 초과 시 429. 배경은 ADR 0009. |
+| `AGENT_RATE_LIMIT` | `30/minute` | `/agent/stream`·`/agent/resume`의 process-local 인바운드 rate limit. 현재 ssuAI proxy는 browser IP를 전달하지 않아 운영 key는 실제 사용자보다 Vercel egress 경계에 가깝다. 초과 시 429이며, 사용자별 quota나 scale-out에는 trusted client identity/IP 전달과 shared store가 필요하다. |
 | `AGENT_MAX_MESSAGE_CHARS` | `8000` | 단일 요청 `message`의 최대 문자 수(pydantic `Field(max_length=…)`). 초과 시 422(oversized-payload 가드, ADR 0009). |
-| LLM 키 | — | `GROQ_API_KEY`/`GOOGLE_API_KEY`/`OPENROUTER_API_KEY` 중 설정된 것만 폴백 시퀀스에 포함(위 Architecture 참조). |
+| LLM 키 | — | `ANTHROPIC_API_KEY`/`GROQ_API_KEY`/`GOOGLE_API_KEY`/`OPENROUTER_API_KEY` 중 설정된 것만 폴백 시퀀스에 포함(위 Architecture 참조). |
+| `ANTHROPIC_MODEL` | `claude-haiku-4-5` | Anthropic provider가 사용할 모델명(`ANTHROPIC_API_KEY` 설정 시에만 사용). |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini 프로바이더가 사용할 모델명(`llm_factory.py`, `GOOGLE_API_KEY` 설정 시에만 사용). |
 
 ### Thread ownership binding
