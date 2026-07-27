@@ -72,7 +72,7 @@ from ssu_agent.agents.react_loop import (
     latest_turn_messages,
 )
 from ssu_agent.llm_factory import create_llm, get_llm_sequence
-from ssu_agent.supervisor.state import SsuAgentState
+from ssu_agent.supervisor.state import SsuAgentState, request_mcp_session_id
 from ssu_agent.tool_results import content_to_text, sanitize_tool_pairing, tool_result_to_text
 
 logger = logging.getLogger(__name__)
@@ -676,7 +676,7 @@ def build_library_agent(
     # ── Nodes ─────────────────────────────────────────────────────────────────
 
     async def agent_node(state: SsuAgentState, config: RunnableConfig) -> dict:
-        mcp_session_id = state.get("mcp_session_id")
+        mcp_session_id = request_mcp_session_id(state)
         messages = sanitize_messages_for_model(
             _library_turn_messages(state["messages"]),
             mcp_session_id,
@@ -876,7 +876,7 @@ def build_library_agent(
             # The FastAPI resume endpoint includes the latest mcp_session_id in
             # the resume payload. Prefer it because top-level Command(update=...)
             # does not rewrite this paused child graph's local checkpoint.
-            mcp_session_id = resume.get("mcp_session_id") or state.get("mcp_session_id")
+            mcp_session_id = request_mcp_session_id(state)
             # action_id sourced from the server-extracted action (never the client
             # resume payload) so the caller cannot point confirm_action at an
             # action it did not just get approval for.

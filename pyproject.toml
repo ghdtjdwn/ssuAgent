@@ -15,6 +15,9 @@ dependencies = [
     "langchain-core>=0.3",
     "langgraph-checkpoint-postgres>=2.0",
     "psycopg[binary,pool]>=3.1",
+    # Direct floor for the audited ASN.1 security fix; keep transitive users on
+    # the patched release without changing their public APIs.
+    "pyasn1>=0.6.4",
     "fastapi>=0.115",
     "slowapi>=0.1.9",
     "uvicorn[standard]>=0.30",

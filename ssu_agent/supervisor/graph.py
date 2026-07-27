@@ -73,7 +73,7 @@ from ssu_agent.agents.library import build_library_agent
 from ssu_agent.agents.lms import build_lms_agent
 from ssu_agent.agents.react_loop import drop_routing_messages, latest_turn_messages
 from ssu_agent.llm_factory import get_llm_sequence
-from ssu_agent.supervisor.state import SsuAgentState
+from ssu_agent.supervisor.state import SsuAgentState, request_mcp_session_id
 from ssu_agent.tool_results import content_to_text, sanitize_tool_pairing
 
 logger = logging.getLogger(__name__)
@@ -458,7 +458,7 @@ async def build_supervisor_graph(
         input_messages = sanitize_tool_pairing(
             sanitize_messages_for_model(
                 _supervisor_model_messages(state["messages"]),
-                state.get("mcp_session_id"),
+                request_mcp_session_id(state),
             )
         )
         input_message_count = len(input_messages)
@@ -470,7 +470,7 @@ async def build_supervisor_graph(
                 )
                 new_messages = sanitize_messages_for_model(
                     result["messages"][input_message_count:],
-                    state.get("mcp_session_id"),
+                    request_mcp_session_id(state),
                 )
                 for msg in new_messages:
                     if isinstance(msg, AIMessage):

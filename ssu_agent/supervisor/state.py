@@ -17,11 +17,43 @@ Why a single state rather than per-agent TypedDicts:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Annotated
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
+
+_UNBOUND = object()
+_request_mcp_session_id: ContextVar[str | None | object] = ContextVar(
+    "request_mcp_session_id",
+    default=_UNBOUND,
+)
+
+
+@contextmanager
+def bind_request_mcp_session_id(mcp_session_id: str | None):
+    """Bind a capability to this async request without checkpointing it."""
+    token = _request_mcp_session_id.set(mcp_session_id)
+    try:
+        yield
+    finally:
+        _request_mcp_session_id.reset(token)
+
+
+def request_mcp_session_id(state: SsuAgentState) -> str | None:
+    """Return the request capability, with legacy direct-graph compatibility.
+
+    Production HTTP entry points always bind the ContextVar and overwrite the
+    historical state channel with ``None``. The state fallback exists only for
+    direct graph callers and old tests while that compatibility surface is
+    phased out.
+    """
+    bound = _request_mcp_session_id.get()
+    if bound is not _UNBOUND:
+        return bound if isinstance(bound, str) else None
+    return state.get("mcp_session_id")
 
 
 class SsuAgentState(TypedDict):
@@ -30,8 +62,9 @@ class SsuAgentState(TypedDict):
 
     # ── Session binding ───────────────────────────────────────────────────────
     # Lifecycle: FastAPI thread_id (LangGraph) ↔ mcp_session_id (ssuMCP auth).
-    # The client passes mcp_session_id on every request so the agent can pass
-    # it to private MCP tools (library reservation, SAINT, LMS) as a parameter.
+    # Compatibility channel only. HTTP entry points always write None and bind
+    # the live capability in a request-scoped ContextVar, so checkpoints never
+    # receive a reusable MCP session ID.
     mcp_session_id: str | None
     # Client-asserted hint from ssuAI's useLibraryAuth().isConnected. This is
     # only a best-effort UX signal; ssuMCP AUTH_REQUIRED remains enforcement.

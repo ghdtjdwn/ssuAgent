@@ -30,7 +30,7 @@ from ssu_agent.agents.library import (
     inner_react_tools,
 )
 from ssu_agent.agents.react_loop import EMPTY_RESPONSE_FALLBACK
-from ssu_agent.supervisor.state import SsuAgentState
+from ssu_agent.supervisor.state import SsuAgentState, bind_request_mcp_session_id
 
 # ── Mock tools ────────────────────────────────────────────────────────────────
 
@@ -738,21 +738,22 @@ async def test_library_resume_confirm_uses_fresh_updated_state():
     interrupted = await graph.ainvoke(initial, config=config)
     assert "__interrupt__" in interrupted
 
-    result = await graph.ainvoke(
-        build_resume_command(
-            ResumeRequest(
-                thread_id="lib-resume-fresh",
-                approved=True,
-                action_id=100,
-                mcp_session_id="fresh-session",
-                library_connected=True,
-            )
-        ),
-        config=config,
-    )
+    with bind_request_mcp_session_id("fresh-session"):
+        result = await graph.ainvoke(
+            build_resume_command(
+                ResumeRequest(
+                    thread_id="lib-resume-fresh",
+                    approved=True,
+                    action_id=100,
+                    mcp_session_id="fresh-session",
+                    library_connected=True,
+                )
+            ),
+            config=config,
+        )
 
     assert confirmed_sessions == ["fresh-session"]
-    assert result["mcp_session_id"] == "fresh-session"
+    assert result["mcp_session_id"] is None
     assert result["library_connected"] is True
 
 

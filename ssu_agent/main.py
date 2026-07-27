@@ -16,9 +16,10 @@ SSE event types emitted:
 MCP session lifecycle (thread_id ↔ mcp_session_id ↔ principal):
   Every FastAPI request carries a `thread_id` (stable per user/device) used
   as the LangGraph checkpoint key. The `mcp_session_id` (ssuMCP private tool
-  auth token) is passed in the request body and stored in SsuAgentState so
-  sub-agents can inject it into private MCP tool calls outside model-visible
-  prompts, schemas, results, and persisted assistant/tool messages.
+  auth token) is passed in the request body but bound only to the current async
+  execution context. Checkpoint state stores None in the legacy channel, while
+  sub-agents can still inject the live value into private MCP tool calls outside
+  model-visible prompts, schemas, results, and persisted messages.
 
   The three concepts are intentionally separate:
   - thread_id: conversation persistence (Postgres checkpoint)
@@ -47,7 +48,7 @@ Checkpointer (Postgres):
   an AsyncConnectionPool (psycopg3). autocommit=True is required by LangGraph.
   setup() creates the checkpoint tables on first startup. The same pool also
   creates thread_owners, which binds client-supplied thread_id values to the
-  creating mcp_session_id or, when supplied, a stable principal (ADR 0011).
+  a one-way session digest or, when supplied, a stable principal digest.
 
 Streaming optimisation:
   astream_events(version="v2") yields rich event dicts. We filter:
@@ -66,15 +67,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
+import re
 import secrets
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
@@ -83,11 +87,13 @@ from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ssu_agent import config
 from ssu_agent.agents.auth_guard import contains_internal_auth_guidance
 from ssu_agent.mcp_client import create_mcp_client
 from ssu_agent.supervisor.graph import build_supervisor_graph
+from ssu_agent.supervisor.state import bind_request_mcp_session_id
 
 # uvicorn does not attach a handler to the root logger, so ssu_agent's INFO-level
 # latency instrumentation (react_loop per-turn provider + per-tool timing) would
@@ -104,30 +110,44 @@ _ssu_logger.propagate = False
 logger = logging.getLogger(__name__)
 
 
-def _client_ip(request: Request) -> str:
-    """Per-IP key for rate limiting. Behind the k3s ingress every request shares
-    the ingress socket address, so prefer the left-most X-Forwarded-For hop (the
-    real client) and fall back to the socket address. Mirrors ssuMCP
-    ClientIpResolver (ADR 0061)."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first
-    return get_remote_address(request)
+_SIGNED_CLIENT_ID_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _rate_limit_identity(request: Request) -> str:
+    """Use only a proxy-signed client ID; never trust caller-supplied forwarding."""
+    client_id = request.headers.get("x-agent-client-id", "")
+    signature = request.headers.get("x-agent-client-signature", "")
+    key = config.AGENT_API_KEY
+    if key and _SIGNED_CLIENT_ID_RE.fullmatch(client_id):
+        expected = hmac.new(
+            key.encode("utf-8"),
+            f"v1:{client_id}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if signature and hmac.compare_digest(signature, expected):
+            return f"proxy:{client_id}"
+    # Direct/legacy traffic shares the actual socket bucket. In particular, an
+    # arbitrary X-Forwarded-For header can no longer mint fresh limiter keys.
+    return f"socket:{get_remote_address(request)}"
 
 
 # Per-IP inbound throttle on /agent/* (mirrors ssuMCP ADR 0061): the endpoints
 # fan out to paid LLM providers, so an unauthenticated flood is a cost/DoS risk.
 # In-memory storage = per-process (prod runs a single replica; documented caveat).
-limiter = Limiter(key_func=_client_ip)
+limiter = Limiter(key_func=_rate_limit_identity)
 
 # Graph and pool references — set during lifespan startup
 _graph = None
 _pool: AsyncConnectionPool | None = None
+_checkpointer: AsyncPostgresSaver | None = None
 _DEEP_HEALTH_MCP_TIMEOUT_SECONDS = 2.0
 
+_THREAD_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+_OPTIONAL_THREAD_ID_PATTERN = r"^(?:[A-Za-z0-9][A-Za-z0-9._:-]{0,127})?$"
+_MCP_SESSION_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+
 _THREAD_OWNER_FORBIDDEN_DETAIL = "이 대화는 현재 세션의 소유가 아닙니다."
+_UNBOUND_STREAM_SESSION = object()
 _STREAM_AUTH_FALLBACK = (
     "학교 서비스 연결은 화면 상단의 ‘연결’에서 진행해 주세요. 로그인 정보나 내부 인증 값은 "
     "채팅에 입력하지 않아도 돼요."
@@ -199,7 +219,7 @@ def _handoff_payload(agent: str) -> dict[str, str]:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """FastAPI lifespan: open Postgres connection pool, build graph, keep alive."""
-    global _graph, _pool
+    global _checkpointer, _graph, _pool
     _validate_security_config()
     async with AsyncConnectionPool(
         conninfo=config.DATABASE_URL,
@@ -212,41 +232,353 @@ async def _lifespan(app: FastAPI):
             checkpointer = AsyncPostgresSaver(pool)
             await checkpointer.setup()
             await _setup_thread_owners(pool)
+            none_type, none_blob = checkpointer.serde.dumps_typed(None)
+            scrubbed = await _scrub_legacy_checkpoint_capabilities(
+                pool,
+                none_type=none_type,
+                none_blob=none_blob,
+            )
+            if scrubbed:
+                logger.info("legacy checkpoint capability scrubbed %d row(s)", scrubbed)
             _pool = pool
+            _checkpointer = checkpointer
             _graph = await build_supervisor_graph(checkpointer=checkpointer)
-            yield
+            cleanup_task = asyncio.create_task(_retention_loop())
+            try:
+                yield
+            finally:
+                cleanup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cleanup_task
         finally:
             _graph = None
             _pool = None
+            _checkpointer = None
 
 
 def _validate_security_config() -> None:
     """Fail startup when production requires the trusted proxy key but it is absent."""
     if config.AGENT_API_KEY_REQUIRED and not config.AGENT_API_KEY:
         raise RuntimeError("AGENT_API_KEY is required when AGENT_API_KEY_REQUIRED=true")
+    if config.AGENT_MAX_REQUEST_BYTES <= 0:
+        raise RuntimeError("AGENT_MAX_REQUEST_BYTES must be positive")
+    if config.AGENT_RETENTION_CLEANUP_INTERVAL_SECONDS <= 0:
+        raise RuntimeError("AGENT_RETENTION_CLEANUP_INTERVAL_SECONDS must be positive")
+    if config.AGENT_RETENTION_CLEANUP_BATCH_SIZE <= 0:
+        raise RuntimeError("AGENT_RETENTION_CLEANUP_BATCH_SIZE must be positive")
+    if config.AGENT_STORAGE_TIMEOUT_SECONDS <= 0:
+        raise RuntimeError("AGENT_STORAGE_TIMEOUT_SECONDS must be positive")
+    if config.AGENT_CAPABILITY_SCRUB_BATCH_SIZE <= 0:
+        raise RuntimeError("AGENT_CAPABILITY_SCRUB_BATCH_SIZE must be positive")
+    if config.AGENT_CAPABILITY_SCRUB_MAX_ROWS <= 0:
+        raise RuntimeError("AGENT_CAPABILITY_SCRUB_MAX_ROWS must be positive")
 
 
 async def _setup_thread_owners(pool: AsyncConnectionPool) -> None:
     async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS thread_owners (
-                    thread_id TEXT PRIMARY KEY,
-                    owner TEXT,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        async with conn.transaction():
+            async with conn.cursor() as cur:
+                # Rolling replicas must not race the trigger replacement below.
+                await cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext('ssuagent_conversation_schema_v1'))"
                 )
-                """
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS thread_owners (
+                        thread_id TEXT PRIMARY KEY,
+                        owner TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
+                )
+                # ADR 0011: owner_kind distinguishes a stable-principal owner from a
+                # legacy/session-scoped owner. ADD COLUMN IF NOT EXISTS keeps this
+                # additive over the ADR 0010 table already live in prod — existing
+                # rows get owner_kind = NULL, which claim_or_verify_thread_owner
+                # treats identically to owner_kind = 'session' (see docstring there).
+                await cur.execute(
+                    "ALTER TABLE thread_owners ADD COLUMN IF NOT EXISTS owner_kind TEXT"
+                )
+                await cur.execute(
+                    "ALTER TABLE thread_owners ADD COLUMN IF NOT EXISTS "
+                    "last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT now()"
+                )
+                await cur.execute(
+                    "CREATE INDEX IF NOT EXISTS thread_owners_last_accessed_idx "
+                    "ON thread_owners (last_accessed_at)"
+                )
+                await cur.execute(
+                    """
+                    CREATE OR REPLACE FUNCTION ssuagent_checkpoint_lifecycle_fence()
+                    RETURNS trigger
+                    LANGUAGE plpgsql
+                    AS $fence$
+                    DECLARE
+                        lifecycle_kind TEXT;
+                    BEGIN
+                        -- Old pods can remain live during a rolling rollout. Make
+                        -- the storage boundary itself normalize their legacy
+                        -- capability channel so it cannot race the startup scrub.
+                        IF TG_TABLE_NAME = 'checkpoints' THEN
+                            IF NEW.checkpoint #> '{channel_values,mcp_session_id}' IS NOT NULL
+                               AND NEW.checkpoint #> '{channel_values,mcp_session_id}'
+                                   <> 'null'::jsonb THEN
+                                NEW.checkpoint := jsonb_set(
+                                    NEW.checkpoint,
+                                    '{channel_values,mcp_session_id}',
+                                    'null'::jsonb,
+                                    false
+                                );
+                            END IF;
+                        ELSIF NEW.channel = 'mcp_session_id' THEN
+                            NEW.type := 'null';
+                            NEW.blob := ''::bytea;
+                        END IF;
+
+                        SELECT owner_kind INTO lifecycle_kind
+                        FROM thread_owners
+                        WHERE thread_id = NEW.thread_id
+                        FOR SHARE;
+
+                        IF lifecycle_kind = 'deleted'
+                           AND current_setting(
+                               'ssuagent.capability_scrub',
+                               true
+                           ) IS DISTINCT FROM 'on' THEN
+                            RAISE EXCEPTION 'checkpoint write rejected for deleted thread'
+                                USING ERRCODE = '55000';
+                        END IF;
+                        RETURN NEW;
+                    END;
+                    $fence$
+                    """
+                )
+                for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
+                    trigger = f"ssuagent_{table}_lifecycle_fence"
+                    await cur.execute(
+                        f"""
+                        DO $trigger$
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1 FROM pg_trigger
+                                WHERE tgname = '{trigger}'
+                                  AND tgrelid = '{table}'::regclass
+                                  AND NOT tgisinternal
+                            ) THEN
+                                CREATE TRIGGER {trigger}
+                                BEFORE INSERT OR UPDATE ON {table}
+                                FOR EACH ROW
+                                EXECUTE FUNCTION ssuagent_checkpoint_lifecycle_fence();
+                            END IF;
+                        END;
+                        $trigger$
+                        """
+                    )
+
+
+_CHECKPOINT_CAPABILITY_SCRUB_SQL = """
+WITH scrub_candidates AS MATERIALIZED (
+    SELECT ctid, thread_id
+    FROM checkpoints
+    WHERE checkpoint #> '{channel_values,mcp_session_id}' IS NOT NULL
+      AND checkpoint #> '{channel_values,mcp_session_id}' <> 'null'::jsonb
+    ORDER BY thread_id, checkpoint_ns, checkpoint_id
+    LIMIT %s
+),
+locked_owners AS MATERIALIZED (
+    SELECT owners.thread_id
+    FROM thread_owners AS owners
+    WHERE owners.thread_id IN (
+        SELECT candidates.thread_id FROM scrub_candidates AS candidates
+    )
+    ORDER BY owners.thread_id
+    FOR SHARE OF owners
+),
+owner_lock_barrier AS MATERIALIZED (
+    SELECT count(*) FROM locked_owners
+)
+UPDATE checkpoints AS target
+SET checkpoint = jsonb_set(
+    target.checkpoint,
+    '{channel_values,mcp_session_id}',
+    'null'::jsonb,
+    false
+)
+FROM scrub_candidates, owner_lock_barrier
+WHERE target.ctid = scrub_candidates.ctid
+RETURNING 1
+"""
+
+_TYPED_CAPABILITY_SCRUB_SQL = """
+WITH scrub_candidates AS MATERIALIZED (
+    SELECT ctid, thread_id
+    FROM {table}
+    WHERE channel = 'mcp_session_id'
+      AND (type IS DISTINCT FROM %s OR blob IS DISTINCT FROM %s)
+    ORDER BY thread_id, checkpoint_ns, channel, ctid
+    LIMIT %s
+),
+locked_owners AS MATERIALIZED (
+    SELECT owners.thread_id
+    FROM thread_owners AS owners
+    WHERE owners.thread_id IN (
+        SELECT candidates.thread_id FROM scrub_candidates AS candidates
+    )
+    ORDER BY owners.thread_id
+    FOR SHARE OF owners
+),
+owner_lock_barrier AS MATERIALIZED (
+    SELECT count(*) FROM locked_owners
+)
+UPDATE {table} AS target
+SET type = %s, blob = %s
+FROM scrub_candidates, owner_lock_barrier
+WHERE target.ctid = scrub_candidates.ctid
+RETURNING 1
+"""
+
+_LEGACY_CAPABILITY_REMAINS_SQL = """
+SELECT
+    EXISTS (
+        SELECT 1 FROM checkpoints
+        WHERE checkpoint #> '{channel_values,mcp_session_id}' IS NOT NULL
+          AND checkpoint #> '{channel_values,mcp_session_id}' <> 'null'::jsonb
+    )
+    OR EXISTS (
+        SELECT 1 FROM checkpoint_blobs
+        WHERE channel = 'mcp_session_id'
+          AND (type IS DISTINCT FROM %s OR blob IS DISTINCT FROM %s)
+    )
+    OR EXISTS (
+        SELECT 1 FROM checkpoint_writes
+        WHERE channel = 'mcp_session_id'
+          AND (type IS DISTINCT FROM %s OR blob IS DISTINCT FROM %s)
+    )
+"""
+
+
+async def _scrub_legacy_checkpoint_capabilities(
+    pool: AsyncConnectionPool,
+    *,
+    none_type: str,
+    none_blob: bytes,
+) -> int:
+    """Replace only legacy MCP capability channels with serialized ``None``.
+
+    LangGraph keeps primitive channel values inline in checkpoint JSONB and
+    pending/channel writes in typed blob rows. Transactions are individually
+    capped; reruns are idempotent because already-null values no longer match.
+    """
+    processed = 0
+    batch_size = config.AGENT_CAPABILITY_SCRUB_BATCH_SIZE
+    max_rows = config.AGENT_CAPABILITY_SCRUB_MAX_ROWS
+
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT pg_advisory_lock(hashtext('ssuagent_capability_scrub_v1'))")
+        try:
+            queries = [
+                (_CHECKPOINT_CAPABILITY_SCRUB_SQL, lambda limit: (limit,)),
+                *[
+                    (
+                        _TYPED_CAPABILITY_SCRUB_SQL.format(table=table),
+                        lambda limit, nt=none_type, nb=none_blob: (nt, nb, limit, nt, nb),
+                    )
+                    for table in ("checkpoint_blobs", "checkpoint_writes")
+                ],
+            ]
+            for query, params_for_limit in queries:
+                while processed < max_rows:
+                    limit = min(batch_size, max_rows - processed)
+                    async with conn.transaction():
+                        async with conn.cursor() as cur:
+                            # The lifecycle fence rejects all writes to deleted
+                            # threads. This transaction-local flag permits only
+                            # this exact maintenance path to sanitize legacy rows
+                            # that predate the fence behind an existing tombstone.
+                            await cur.execute(
+                                "SELECT set_config('ssuagent.capability_scrub', 'on', true)"
+                            )
+                            await cur.execute(query, params_for_limit(limit))
+                            changed = len(await cur.fetchall())
+                    processed += changed
+                    if changed < limit:
+                        break
+
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    _LEGACY_CAPABILITY_REMAINS_SQL,
+                    (none_type, none_blob, none_type, none_blob),
+                )
+                row = await cur.fetchone()
+            if row and row[0]:
+                raise RuntimeError(
+                    "legacy checkpoint capability scrub exceeded AGENT_CAPABILITY_SCRUB_MAX_ROWS"
+                )
+            return processed
+        finally:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT pg_advisory_unlock(hashtext('ssuagent_capability_scrub_v1'))"
+                )
+
+
+class RequestBodyLimitMiddleware:
+    """Reject oversized agent bodies before FastAPI allocates/decodes JSON."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] != "http"
+            or scope.get("method") not in {"POST", "DELETE"}
+            or not scope.get("path", "").startswith("/agent/")
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        content_length = headers.get(b"content-length")
+        if content_length:
+            try:
+                if int(content_length) > config.AGENT_MAX_REQUEST_BYTES:
+                    await JSONResponse({"detail": "Request body too large"}, status_code=413)(
+                        scope, receive, send
+                    )
+                    return
+            except ValueError:
+                await JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)(
+                    scope, receive, send
+                )
+                return
+
+        received = 0
+
+        async def limited_receive() -> Message:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > config.AGENT_MAX_REQUEST_BYTES:
+                    raise _RequestBodyTooLarge
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except _RequestBodyTooLarge:
+            await JSONResponse({"detail": "Request body too large"}, status_code=413)(
+                scope, receive, send
             )
-            # ADR 0011: owner_kind distinguishes a stable-principal owner from a
-            # legacy/session-scoped owner. ADD COLUMN IF NOT EXISTS keeps this
-            # additive over the ADR 0010 table already live in prod — existing
-            # rows get owner_kind = NULL, which claim_or_verify_thread_owner
-            # treats identically to owner_kind = 'session' (see docstring there).
-            await cur.execute("ALTER TABLE thread_owners ADD COLUMN IF NOT EXISTS owner_kind TEXT")
+
+
+class _RequestBodyTooLarge(Exception):
+    pass
 
 
 app = FastAPI(title="ssuAgent", version="0.2.0", lifespan=_lifespan)
+app.add_middleware(RequestBodyLimitMiddleware)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -293,6 +625,11 @@ def _hash_principal(principal: str) -> str:
     return hashlib.sha256(principal.encode("utf-8")).hexdigest()
 
 
+def _hash_mcp_session_id(mcp_session_id: str) -> str:
+    """Create a non-reversible owner lookup value from a bearer capability."""
+    return hashlib.sha256(f"mcp-session:{mcp_session_id}".encode("utf-8")).hexdigest()
+
+
 async def claim_or_verify_thread_owner(
     thread_id: str,
     mcp_session_id: str | None,
@@ -324,63 +661,189 @@ async def claim_or_verify_thread_owner(
 
     hashed_principal = _hash_principal(principal) if principal else None
 
+    hashed_session = _hash_mcp_session_id(mcp_session_id) if mcp_session_id else None
+
     if hashed_principal is not None:
         claim_owner, claim_kind = hashed_principal, "principal"
-    elif mcp_session_id is not None:
-        claim_owner, claim_kind = mcp_session_id, "session"
+    elif hashed_session is not None:
+        claim_owner, claim_kind = hashed_session, "session_hash"
     else:
         claim_owner, claim_kind = None, None
 
     async with _pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                INSERT INTO thread_owners (thread_id, owner, owner_kind)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (thread_id) DO NOTHING
-                """,
-                (thread_id, claim_owner, claim_kind),
-            )
-            await cur.execute(
-                "SELECT owner, owner_kind FROM thread_owners WHERE thread_id = %s",
-                (thread_id,),
-            )
-            row = await cur.fetchone()
-
-            if row is None:
-                raise HTTPException(status_code=503, detail="Agent storage is not ready")
-
-            stored_owner, stored_kind = row
-
-            if stored_owner is None:
-                return  # Anonymous thread — open to any caller (ADR 0010).
-
-            if stored_kind == "principal":
-                if hashed_principal is not None and hashed_principal == stored_owner:
-                    return
-                raise HTTPException(status_code=403, detail=_THREAD_OWNER_FORBIDDEN_DETAIL)
-
-            # stored_kind == "session", or NULL for rows written before ADR 0011
-            # shipped (pre-existing ADR 0010 rows never had an owner_kind column
-            # value) — both mean "owned by the mcp_session_id in `owner`".
-            if stored_owner != mcp_session_id:
-                raise HTTPException(status_code=403, detail=_THREAD_OWNER_FORBIDDEN_DETAIL)
-
-            # Verified as the rightful session. If this request now carries a
-            # principal, lazily upgrade the thread from session- to
-            # principal-ownership so a future re-login (new mcp_session_id, same
-            # principal) still finds it. Runs at most once per thread: after
-            # this UPDATE, stored_kind is "principal" and the branch above
-            # handles all later calls.
-            if hashed_principal is not None:
+        async with conn.transaction():
+            async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    UPDATE thread_owners
-                    SET owner = %s, owner_kind = 'principal'
-                    WHERE thread_id = %s
+                    INSERT INTO thread_owners (thread_id, owner, owner_kind)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (thread_id) DO NOTHING
                     """,
-                    (hashed_principal, thread_id),
+                    (thread_id, claim_owner, claim_kind),
                 )
+                await cur.execute(
+                    "SELECT owner, owner_kind FROM thread_owners WHERE thread_id = %s FOR UPDATE",
+                    (thread_id,),
+                )
+                row = await cur.fetchone()
+
+                if row is None:
+                    raise HTTPException(status_code=503, detail="Agent storage is not ready")
+
+                stored_owner, stored_kind = row
+
+                if stored_kind == "deleted":
+                    raise HTTPException(status_code=410, detail="Conversation was deleted")
+
+                if stored_owner is None:
+                    await cur.execute(
+                        "UPDATE thread_owners SET last_accessed_at = now() WHERE thread_id = %s",
+                        (thread_id,),
+                    )
+                    return  # Anonymous thread — open to any caller (ADR 0010).
+
+                if stored_kind == "principal":
+                    if hashed_principal is None or hashed_principal != stored_owner:
+                        raise HTTPException(status_code=403, detail=_THREAD_OWNER_FORBIDDEN_DETAIL)
+                elif stored_kind == "session_hash":
+                    if hashed_session is None or hashed_session != stored_owner:
+                        raise HTTPException(status_code=403, detail=_THREAD_OWNER_FORBIDDEN_DETAIL)
+                    if hashed_principal is not None:
+                        await cur.execute(
+                            "UPDATE thread_owners SET owner = %s, owner_kind = 'principal' "
+                            "WHERE thread_id = %s",
+                            (hashed_principal, thread_id),
+                        )
+                else:
+                    # Rows created before this hardening stored the raw session
+                    # under owner_kind='session' (or NULL). Verify once, then
+                    # migrate immediately to a digest or stable principal.
+                    if stored_owner != mcp_session_id:
+                        raise HTTPException(status_code=403, detail=_THREAD_OWNER_FORBIDDEN_DETAIL)
+                    migrated_owner = hashed_principal or hashed_session
+                    migrated_kind = "principal" if hashed_principal else "session_hash"
+                    await cur.execute(
+                        "UPDATE thread_owners SET owner = %s, owner_kind = %s WHERE thread_id = %s",
+                        (migrated_owner, migrated_kind, thread_id),
+                    )
+
+                await cur.execute(
+                    "UPDATE thread_owners SET last_accessed_at = now() WHERE thread_id = %s",
+                    (thread_id,),
+                )
+
+
+def _owner_matches(
+    stored_owner: str | None,
+    stored_kind: str | None,
+    mcp_session_id: str | None,
+    principal: str | None,
+) -> bool:
+    if stored_owner is None:
+        return True
+    if stored_kind == "principal":
+        return principal is not None and hmac.compare_digest(
+            stored_owner,
+            _hash_principal(principal),
+        )
+    if stored_kind == "session_hash":
+        return mcp_session_id is not None and hmac.compare_digest(
+            stored_owner, _hash_mcp_session_id(mcp_session_id)
+        )
+    return mcp_session_id is not None and hmac.compare_digest(stored_owner, mcp_session_id)
+
+
+async def delete_owned_thread(
+    thread_id: str,
+    mcp_session_id: str | None,
+    principal: str | None,
+) -> bool:
+    """Atomically delete an owned thread and all LangGraph checkpoint rows."""
+    if _pool is None:
+        raise HTTPException(status_code=503, detail="Agent storage is not ready")
+    async with _pool.connection() as conn:
+        async with conn.transaction():
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT owner, owner_kind FROM thread_owners WHERE thread_id = %s FOR UPDATE",
+                    (thread_id,),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return False
+                if row[1] == "deleted":
+                    return False
+                if not _owner_matches(row[0], row[1], mcp_session_id, principal):
+                    raise HTTPException(status_code=403, detail=_THREAD_OWNER_FORBIDDEN_DETAIL)
+                for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
+                    await cur.execute(f"DELETE FROM {table} WHERE thread_id = %s", (thread_id,))
+                # Keep a non-identifying tombstone until normal retention. The
+                # lifecycle trigger holds a shared owner-row lock for saver writes;
+                # after this transaction commits it rejects every late write.
+                await cur.execute(
+                    "UPDATE thread_owners SET owner = NULL, owner_kind = 'deleted', "
+                    "last_accessed_at = now() WHERE thread_id = %s",
+                    (thread_id,),
+                )
+                return True
+
+
+async def cleanup_expired_threads() -> int:
+    """Delete one retention batch in a single rollback-safe transaction."""
+    if _pool is None or config.AGENT_CONVERSATION_RETENTION_DAYS <= 0:
+        return 0
+    async with _pool.connection() as conn:
+        async with conn.transaction():
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    WITH candidates AS MATERIALIZED (
+                        SELECT thread_id
+                        FROM thread_owners
+                        WHERE last_accessed_at < now() - (%s * interval '1 day')
+                        ORDER BY last_accessed_at, thread_id
+                        LIMIT %s
+                    )
+                    SELECT owners.thread_id
+                    FROM thread_owners AS owners
+                    JOIN candidates USING (thread_id)
+                    WHERE owners.last_accessed_at < now() - (%s * interval '1 day')
+                    ORDER BY owners.thread_id
+                    FOR UPDATE OF owners SKIP LOCKED
+                    """,
+                    (
+                        config.AGENT_CONVERSATION_RETENTION_DAYS,
+                        config.AGENT_RETENTION_CLEANUP_BATCH_SIZE,
+                        config.AGENT_CONVERSATION_RETENTION_DAYS,
+                    ),
+                )
+                thread_ids = [row[0] for row in await cur.fetchall()]
+                if not thread_ids:
+                    return 0
+                for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
+                    await cur.execute(
+                        f"DELETE FROM {table} WHERE thread_id = ANY(%s)",
+                        (thread_ids,),
+                    )
+                await cur.execute(
+                    "DELETE FROM thread_owners WHERE thread_id = ANY(%s)",
+                    (thread_ids,),
+                )
+                return len(thread_ids)
+
+
+async def _retention_loop() -> None:
+    while True:
+        await asyncio.sleep(config.AGENT_RETENTION_CLEANUP_INTERVAL_SECONDS)
+        try:
+            deleted = await asyncio.wait_for(
+                cleanup_expired_threads(),
+                timeout=config.AGENT_STORAGE_TIMEOUT_SECONDS,
+            )
+            if deleted:
+                logger.info("conversation retention deleted %d expired thread(s)", deleted)
+        except Exception as exc:
+            logger.warning("conversation retention cleanup failed: type=%s", type(exc).__name__)
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -389,8 +852,12 @@ async def claim_or_verify_thread_owner(
 class AgentRequest(BaseModel):
     # Oversized-payload guard: cap the free-text message (config-tunable).
     message: str = Field(max_length=config.AGENT_MAX_MESSAGE_CHARS)
-    thread_id: str = ""  # "" → new conversation
-    mcp_session_id: str | None = None
+    thread_id: str = Field(default="", max_length=128, pattern=_OPTIONAL_THREAD_ID_PATTERN)
+    mcp_session_id: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=_MCP_SESSION_ID_PATTERN,
+    )
     # Client-asserted library auth hint. Used only for pre-LLM UX gating; ssuMCP
     # AUTH_REQUIRED remains the real auth boundary.
     library_connected: bool = False
@@ -398,16 +865,29 @@ class AgentRequest(BaseModel):
     # independent of the rotating mcp_session_id. The ssuAI proxy supplies its
     # verified subject; direct and legacy callers may omit it, so it MUST default
     # to None and every code path MUST keep working when it is never sent.
-    principal: str | None = None
+    principal: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ResumeRequest(BaseModel):
-    thread_id: str
+    thread_id: str = Field(min_length=1, max_length=128, pattern=_THREAD_ID_PATTERN)
     approved: bool
     action_id: int | None = None
-    mcp_session_id: str | None = None
+    mcp_session_id: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=_MCP_SESSION_ID_PATTERN,
+    )
     library_connected: bool = False
-    principal: str | None = None
+    principal: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ThreadAccessRequest(BaseModel):
+    mcp_session_id: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=_MCP_SESSION_ID_PATTERN,
+    )
+    principal: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 def build_resume_command(req: ResumeRequest) -> Command:
@@ -415,13 +895,14 @@ def build_resume_command(req: ResumeRequest) -> Command:
     resume_payload = {
         "approved": req.approved,
         "action_id": req.action_id,
-        "mcp_session_id": req.mcp_session_id,
         "library_connected": req.library_connected,
     }
     return Command(
         resume=resume_payload,
         update={
-            "mcp_session_id": req.mcp_session_id,
+            # Explicitly scrub the legacy checkpoint channel. The live bearer
+            # capability is bound only for this request by _stream_graph.
+            "mcp_session_id": None,
             "library_connected": req.library_connected,
         },
     )
@@ -547,7 +1028,25 @@ class _FunctionTagStripper:
         return out
 
 
-async def _stream_graph(input_data: dict | object, config: dict):
+async def _request_scoped_graph_events(
+    input_data: dict | object,
+    config: dict,
+    mcp_session_id: str | None | object,
+):
+    if mcp_session_id is _UNBOUND_STREAM_SESSION:
+        async for event in _graph.astream_events(input_data, config=config, version="v2"):
+            yield event
+        return
+    with bind_request_mcp_session_id(mcp_session_id):
+        async for event in _graph.astream_events(input_data, config=config, version="v2"):
+            yield event
+
+
+async def _stream_graph(
+    input_data: dict | object,
+    config: dict,
+    mcp_session_id: str | None | object = _UNBOUND_STREAM_SESSION,
+):
     """Yield SSE strings from graph.astream_events."""
     stripper = _FunctionTagStripper()
     streamed_message_ids: set[str] = set()
@@ -565,7 +1064,7 @@ async def _stream_graph(input_data: dict | object, config: dict):
     handoff_emitted = False
     suppress_chain_start_handoff = _is_resume_stream_input(input_data)
     try:
-        async for event in _graph.astream_events(input_data, config=config, version="v2"):
+        async for event in _request_scoped_graph_events(input_data, config, mcp_session_id):
             etype = event.get("event", "")
             name = event.get("name", "")
 
@@ -723,14 +1222,16 @@ async def stream_agent(request: Request, req: AgentRequest):
     await claim_or_verify_thread_owner(thread_id, req.mcp_session_id, req.principal)
     initial_state = {
         "messages": [{"role": "user", "content": req.message}],
-        "mcp_session_id": req.mcp_session_id,
+        # Scrub the legacy checkpoint channel. The live value is bound only to
+        # this request's async execution below.
+        "mcp_session_id": None,
         "library_connected": req.library_connected,
         "active_agent": None,
     }
     config = {"configurable": {"thread_id": thread_id}}
 
     return StreamingResponse(
-        _stream_graph(initial_state, config),
+        _stream_graph(initial_state, config, req.mcp_session_id),
         media_type="text/event-stream",
         headers={
             "X-Thread-Id": thread_id,
@@ -754,7 +1255,7 @@ async def resume_agent(request: Request, req: ResumeRequest):
     config = {"configurable": {"thread_id": req.thread_id}}
 
     return StreamingResponse(
-        _stream_graph(build_resume_command(req), config),
+        _stream_graph(build_resume_command(req), config, req.mcp_session_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
@@ -763,6 +1264,52 @@ async def resume_agent(request: Request, req: ResumeRequest):
 @app.get("/health")
 async def health():
     return {"status": "UP", "version": app.version}
+
+
+@app.get("/ready")
+async def readiness():
+    if _pool is None or _checkpointer is None or _graph is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "DOWN", "postgres": "DOWN", "checkpointer": "DOWN"},
+        )
+
+    async def check_storage() -> None:
+        async with _pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
+                await cur.fetchone()
+        await _checkpointer.aget_tuple({"configurable": {"thread_id": "__readiness_probe__"}})
+
+    try:
+        await asyncio.wait_for(check_storage(), timeout=config.AGENT_STORAGE_TIMEOUT_SECONDS)
+    except Exception as exc:
+        logger.warning("readiness storage check failed: type=%s", type(exc).__name__)
+        return JSONResponse(
+            status_code=503,
+            content={"status": "DOWN", "postgres": "DOWN", "checkpointer": "DOWN"},
+        )
+    return {"status": "UP", "postgres": "UP", "checkpointer": "UP"}
+
+
+@app.delete("/agent/threads/{thread_id}", dependencies=[Depends(verify_agent_key)])
+@limiter.limit(lambda: config.AGENT_RATE_LIMIT)
+async def delete_thread(
+    request: Request,
+    access: ThreadAccessRequest,
+    thread_id: Annotated[
+        str,
+        Path(min_length=1, max_length=128, pattern=_THREAD_ID_PATTERN),
+    ],
+):
+    try:
+        await asyncio.wait_for(
+            delete_owned_thread(thread_id, access.mcp_session_id, access.principal),
+            timeout=config.AGENT_STORAGE_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=503, detail="Agent storage operation timed out") from exc
+    return Response(status_code=204)
 
 
 @app.get("/healthz/deep")

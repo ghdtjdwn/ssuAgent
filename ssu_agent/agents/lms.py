@@ -23,7 +23,7 @@ from ssu_agent import config as agent_config
 from ssu_agent.agents.auth_guard import ProviderLinkState, check_provider_link, tools_for_model
 from ssu_agent.agents.react_loop import run_react_loop
 from ssu_agent.llm_factory import create_llm, get_llm_sequence
-from ssu_agent.supervisor.state import SsuAgentState
+from ssu_agent.supervisor.state import SsuAgentState, request_mcp_session_id
 
 _SYSTEM_PROMPT_BASE = """당신은 숭실대학교 LMS(Canvas) 전문 AI 어시스턴트입니다.
 
@@ -178,7 +178,7 @@ def build_lms_agent(
         llm_seq = [create_llm()]
 
     async def agent_node(state: SsuAgentState, config: RunnableConfig) -> dict:
-        mcp_session_id = state.get("mcp_session_id")
+        mcp_session_id = request_mcp_session_id(state)
         if not mcp_session_id:
             return {
                 "messages": [AIMessage(content=f"[LMS 에이전트] {_LMS_LOGIN_MESSAGE}")],

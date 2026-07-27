@@ -34,7 +34,7 @@ from ssu_agent.agents.auth_guard import (
     sanitize_tool_result_for_model,
     session_bound_tool_names,
 )
-from ssu_agent.supervisor.state import SsuAgentState
+from ssu_agent.supervisor.state import SsuAgentState, request_mcp_session_id
 from ssu_agent.tool_results import content_to_text, sanitize_tool_pairing, tool_result_to_text
 
 logger = logging.getLogger(__name__)
@@ -292,7 +292,7 @@ async def run_react_loop(
             drop_routing_messages(state["messages"]),
             agent_tag=tag,
         ),
-        state.get("mcp_session_id"),
+        request_mcp_session_id(state),
     )
     input_messages = sanitize_tool_pairing([SystemMessage(content=system_prompt), *messages])
     private_names = session_bound_tool_names(tools)
@@ -373,7 +373,7 @@ async def run_react_loop(
                             tc,
                             tools,
                             config,
-                            state.get("mcp_session_id"),
+                            request_mcp_session_id(state),
                             defer_standalone=(
                                 standalone_batch
                                 and tc.get("name") in (standalone_tool_names or set())
@@ -446,7 +446,7 @@ async def run_react_loop(
                 history.extend(
                     sanitize_messages_for_model(
                         list(tool_messages),
-                        state.get("mcp_session_id"),
+                        request_mcp_session_id(state),
                     )
                 )
 
