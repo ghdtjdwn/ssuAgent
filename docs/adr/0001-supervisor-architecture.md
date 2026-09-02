@@ -107,8 +107,8 @@ def library_tool(query: str) -> str:
 ```python
 class SsuAgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]  # merge channel (reducer)
-    mcp_session_id: str | None   # 단순 override (마지막 쓰기가 승리)
-    active_agent: str | None     # 단순 override
+    mcp_session_id: str | None  # 단순 override (마지막 쓰기가 승리)
+    active_agent: str | None  # 단순 override
     pending_action: dict | None  # 단순 override
 ```
 

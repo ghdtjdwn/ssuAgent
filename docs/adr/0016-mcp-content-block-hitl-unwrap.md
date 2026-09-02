@@ -39,7 +39,7 @@
 반환**한다:
 
 ```python
-[{"type": "text", "text": "{\"status\":\"OK\",...,\"data\":{\"actionId\":42}}"}]
+[{"type": "text", "text": '{"status":"OK",...,"data":{"actionId":42}}'}]
 ```
 
 기존 코드는 `content = result if isinstance(result, str) else json.dumps(result,
