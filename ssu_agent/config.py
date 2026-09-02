@@ -38,8 +38,27 @@ AGENT_API_KEY_REQUIRED: bool = os.getenv("AGENT_API_KEY_REQUIRED", "false").stri
 # unauthenticated request flood is a cost-exhaustion / DoS vector.
 AGENT_RATE_LIMIT: str = os.getenv("AGENT_RATE_LIMIT", "30/minute").strip()
 
-# Max characters accepted in a single agent message (oversized-payload guard).
+# Request boundary limits. The byte cap is enforced before JSON decoding; the
+# character cap remains a model-cost guard after decoding.
+AGENT_MAX_REQUEST_BYTES: int = int(os.getenv("AGENT_MAX_REQUEST_BYTES", "32768"))
 AGENT_MAX_MESSAGE_CHARS: int = int(os.getenv("AGENT_MAX_MESSAGE_CHARS", "8000"))
+
+# Conversation data lifecycle. Cleanup removes at most one bounded batch per
+# interval so it cannot monopolize the shared checkpointer pool.
+AGENT_CONVERSATION_RETENTION_DAYS: int = int(os.getenv("AGENT_CONVERSATION_RETENTION_DAYS", "30"))
+AGENT_RETENTION_CLEANUP_INTERVAL_SECONDS: int = int(
+    os.getenv("AGENT_RETENTION_CLEANUP_INTERVAL_SECONDS", "3600")
+)
+AGENT_RETENTION_CLEANUP_BATCH_SIZE: int = int(
+    os.getenv("AGENT_RETENTION_CLEANUP_BATCH_SIZE", "100")
+)
+AGENT_STORAGE_TIMEOUT_SECONDS: float = float(os.getenv("AGENT_STORAGE_TIMEOUT_SECONDS", "2"))
+
+# Startup compatibility scrub for checkpoints written before request-scoped MCP
+# capabilities. Work is chunked and fails closed if this total safety ceiling is
+# insufficient, so old bearer values are never silently served.
+AGENT_CAPABILITY_SCRUB_BATCH_SIZE: int = int(os.getenv("AGENT_CAPABILITY_SCRUB_BATCH_SIZE", "500"))
+AGENT_CAPABILITY_SCRUB_MAX_ROWS: int = int(os.getenv("AGENT_CAPABILITY_SCRUB_MAX_ROWS", "100000"))
 
 # psycopg AsyncConnectionPool ceiling for LangGraph checkpointer traffic.
 AGENT_PG_POOL_MAX_SIZE: int = int(os.getenv("AGENT_PG_POOL_MAX_SIZE", "5"))

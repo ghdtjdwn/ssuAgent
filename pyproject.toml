@@ -13,8 +13,12 @@ dependencies = [
     "mcp>=1.28.1,<2",
     "langchain-google-genai>=2",
     "langchain-core>=0.3",
-    "langgraph-checkpoint-postgres>=2.0",
+    "langgraph-checkpoint-postgres>=3.1.1,<4",
     "psycopg[binary,pool]>=3.1",
+    # Direct floors for audited security fixes keep transitive users on patched
+    # releases without changing their public APIs.
+    "cryptography>=50.0.0",
+    "pyasn1>=0.6.4",
     "fastapi>=0.115",
     "slowapi>=0.1.9",
     "uvicorn[standard]>=0.30",

@@ -19,6 +19,7 @@
 - [Stable principal binding](adr/0011-thread-stable-principal-binding.md)
 - [Optional Anthropic provider](adr/0015-optional-anthropic-provider.md)
 - [Deterministic LMS export](adr/0022-deterministic-lms-export-download.md)
+- [Conversation lifecycle and signed edge identity](adr/0023-conversation-lifecycle-and-edge-identity.md)
 
 ## 운영
 

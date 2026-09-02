@@ -50,12 +50,28 @@ async def test_lifespan_uses_configured_pg_pool_max_size(monkeypatch: pytest.Mon
     class FakeSaver:
         def __init__(self, pool: FakePool) -> None:
             self.pool = pool
+            self.serde = self
 
         async def setup(self) -> None:
             return None
 
+        @staticmethod
+        def dumps_typed(value: object) -> tuple[str, bytes]:
+            assert value is None
+            return ("null", b"")
+
     async def fake_setup_thread_owners(pool: FakePool) -> None:
         assert isinstance(pool, FakePool)
+
+    async def fake_scrub_capabilities(
+        pool: FakePool,
+        *,
+        none_type: str,
+        none_blob: bytes,
+    ) -> int:
+        assert isinstance(pool, FakePool)
+        assert (none_type, none_blob) == ("null", b"")
+        return 0
 
     async def fake_build_supervisor_graph(*, checkpointer: FakeSaver) -> object:
         assert isinstance(checkpointer, FakeSaver)
@@ -66,6 +82,7 @@ async def test_lifespan_uses_configured_pg_pool_max_size(monkeypatch: pytest.Mon
     monkeypatch.setattr(main, "AsyncConnectionPool", FakePool)
     monkeypatch.setattr(main, "AsyncPostgresSaver", FakeSaver)
     monkeypatch.setattr(main, "_setup_thread_owners", fake_setup_thread_owners)
+    monkeypatch.setattr(main, "_scrub_legacy_checkpoint_capabilities", fake_scrub_capabilities)
     monkeypatch.setattr(main, "build_supervisor_graph", fake_build_supervisor_graph)
 
     async with main._lifespan(main.app):

@@ -11,3 +11,10 @@ data:
   SSUMCP_URL: {{ .Values.env.ssumcpUrl | quote }}
   ALLOWED_ORIGINS: {{ .Values.env.allowedOrigins | quote }}
   AGENT_API_KEY_REQUIRED: {{ .Values.env.agentApiKeyRequired | quote }}
+  AGENT_MAX_REQUEST_BYTES: {{ .Values.env.agentMaxRequestBytes | quote }}
+  AGENT_CONVERSATION_RETENTION_DAYS: {{ .Values.env.conversationRetentionDays | quote }}
+  AGENT_RETENTION_CLEANUP_INTERVAL_SECONDS: {{ .Values.env.retentionCleanupIntervalSeconds | quote }}
+  AGENT_RETENTION_CLEANUP_BATCH_SIZE: {{ .Values.env.retentionCleanupBatchSize | quote }}
+  AGENT_STORAGE_TIMEOUT_SECONDS: {{ .Values.env.storageTimeoutSeconds | quote }}
+  AGENT_CAPABILITY_SCRUB_BATCH_SIZE: {{ .Values.env.capabilityScrubBatchSize | quote }}
+  AGENT_CAPABILITY_SCRUB_MAX_ROWS: {{ .Values.env.capabilityScrubMaxRows | quote }}

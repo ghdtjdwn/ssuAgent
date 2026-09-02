@@ -10,16 +10,22 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from ssu_agent import config, main
 
 # ADR 0011: thread_owners rows are (owner, owner_kind) pairs — owner_kind is
-# "principal" (stable subject), "session" (mcp_session_id, ADR 0010 legacy
+# "principal" (stable subject), "session_hash" (hashed mcp_session_id),
+# "session" (raw ADR 0010 legacy
 # behavior), or None alongside owner=None for an anonymous thread.
 OwnerRow = tuple[str | None, str | None]
 
 
-async def _fake_stream_graph(input_data, config):  # noqa: A002 - mirrors prod signature
+async def _fake_stream_graph(  # noqa: A002 - mirrors prod signature
+    input_data,
+    config,
+    mcp_session_id=None,
+):
     """Stand-in for _stream_graph: one dummy SSE line, no LLM/DB."""
     yield 'data: {"type": "done"}\n\n'
 
@@ -46,7 +52,20 @@ class _FakeOwnerCursor:
             (thread_id,) = params
             self._row = self.owners.get(thread_id)
             return
-        if normalized.startswith("UPDATE THREAD_OWNERS"):
+        if normalized.startswith("UPDATE THREAD_OWNERS SET LAST_ACCESSED_AT"):
+            self._row = None
+            return
+        if "OWNER_KIND = 'DELETED'" in normalized:
+            (thread_id,) = params
+            self.owners[thread_id] = (None, "deleted")
+            self._row = None
+            return
+        if "SET OWNER = %S, OWNER_KIND = %S" in normalized:
+            owner, owner_kind, thread_id = params
+            self.owners[thread_id] = (owner, owner_kind)
+            self._row = None
+            return
+        if "SET OWNER = %S, OWNER_KIND = 'PRINCIPAL'" in normalized:
             owner, thread_id = params
             self.owners[thread_id] = (owner, "principal")
             self._row = None
@@ -55,6 +74,20 @@ class _FakeOwnerCursor:
             self._row = None
             return
         if normalized.startswith("ALTER TABLE THREAD_OWNERS"):
+            self._row = None
+            return
+        if normalized.startswith("DELETE FROM THREAD_OWNERS"):
+            (thread_id,) = params
+            self.owners.pop(thread_id, None)
+            self._row = None
+            return
+        if normalized.startswith(
+            (
+                "DELETE FROM CHECKPOINTS",
+                "DELETE FROM CHECKPOINT_BLOBS",
+                "DELETE FROM CHECKPOINT_WRITES",
+            )
+        ):
             self._row = None
             return
         raise AssertionError(f"unexpected query: {query}")
@@ -75,6 +108,9 @@ class _FakeOwnerConnection:
 
     def cursor(self):
         return _FakeOwnerCursor(self.owners)
+
+    def transaction(self):
+        return self
 
 
 class _FakeOwnerPool:
@@ -143,6 +179,15 @@ def test_security_config_accepts_configured_required_api_key(monkeypatch: pytest
     main._validate_security_config()
 
 
+def test_security_config_rejects_non_positive_cleanup_interval(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(config, "AGENT_RETENTION_CLEANUP_INTERVAL_SECONDS", 0)
+
+    with pytest.raises(RuntimeError, match="CLEANUP_INTERVAL_SECONDS must be positive"):
+        main._validate_security_config()
+
+
 def test_health_open(client: TestClient):
     resp = client.get("/health")
     assert resp.status_code == 200
@@ -192,6 +237,52 @@ def test_deep_health_reports_mcp_down(monkeypatch: pytest.MonkeyPatch, client: T
     assert resp.json() == {"status": "DEGRADED", "mcp": "DOWN"}
 
 
+def test_readiness_checks_pool_and_checkpointer_with_bounded_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+):
+    class ReadinessCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, query):
+            assert query == "SELECT 1"
+
+        async def fetchone(self):
+            return (1,)
+
+    class ReadinessConnection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self):
+            return ReadinessCursor()
+
+    class ReadinessPool:
+        def connection(self):
+            return ReadinessConnection()
+
+    class ReadinessCheckpointer:
+        async def aget_tuple(self, config):
+            assert config == {"configurable": {"thread_id": "__readiness_probe__"}}
+            return None
+
+    monkeypatch.setattr(main, "_pool", ReadinessPool())
+    monkeypatch.setattr(main, "_checkpointer", ReadinessCheckpointer())
+    monkeypatch.setattr(main, "_graph", object())
+
+    resp = client.get("/ready")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "UP", "postgres": "UP", "checkpointer": "UP"}
+
+
 def test_agent_request_models_default_and_accept_library_connected():
     assert main.AgentRequest(message="hi").library_connected is False
     assert main.AgentRequest(message="hi", library_connected=True).library_connected is True
@@ -209,8 +300,13 @@ def test_stream_initial_state_includes_library_connected(
 ):
     captured: dict[str, object] = {}
 
-    async def capture_stream_graph(input_data, config):  # noqa: A002 - mirrors prod signature
+    async def capture_stream_graph(  # noqa: A002 - mirrors prod signature
+        input_data,
+        config,
+        mcp_session_id=None,
+    ):
         captured["input_data"] = input_data
+        captured["mcp_session_id"] = mcp_session_id
         yield 'data: {"type": "done"}\n\n'
 
     monkeypatch.setattr(main, "_stream_graph", capture_stream_graph)
@@ -226,6 +322,7 @@ def test_stream_initial_state_includes_library_connected(
 
     assert resp.status_code == 200
     assert captured["input_data"]["library_connected"] is True
+    assert captured["input_data"]["mcp_session_id"] is None
 
 
 def test_resume_builds_atomic_command_without_pre_update_state(
@@ -237,9 +334,14 @@ def test_resume_builds_atomic_command_without_pre_update_state(
     fake_graph = _FakeResumeGraph()
     captured: dict[str, object] = {}
 
-    async def capture_stream_graph(input_data, config):  # noqa: A002 - mirrors prod signature
+    async def capture_stream_graph(  # noqa: A002 - mirrors prod signature
+        input_data,
+        config,
+        mcp_session_id=None,
+    ):
         captured["input_data"] = input_data
         captured["config"] = config
+        captured["mcp_session_id"] = mcp_session_id
         yield 'data: {"type": "done"}\n\n'
 
     monkeypatch.setattr(main, "_graph", fake_graph)
@@ -262,14 +364,13 @@ def test_resume_builds_atomic_command_without_pre_update_state(
     assert captured["input_data"].resume == {
         "approved": True,
         "action_id": 100,
-        "mcp_session_id": "fresh-session",
         "library_connected": True,
     }
     assert captured["input_data"].update == {
-        "mcp_session_id": "fresh-session",
+        "mcp_session_id": None,
         "library_connected": True,
     }
-    assert captured["input_data"].resume["mcp_session_id"] == "fresh-session"
+    assert captured["mcp_session_id"] == "fresh-session"
     assert captured["input_data"].resume["library_connected"] is True
 
 
@@ -285,7 +386,10 @@ def test_stream_binds_new_thread_and_allows_same_owner(
         json={"message": "hi", "thread_id": "owned-t1", "mcp_session_id": "mcp-a"},
     )
     assert resp.status_code == 200
-    assert owner_pool.owners["owned-t1"] == ("mcp-a", "session")
+    assert owner_pool.owners["owned-t1"] == (
+        main._hash_mcp_session_id("mcp-a"),
+        "session_hash",
+    )
 
     resp = client.post(
         "/agent/stream",
@@ -422,7 +526,10 @@ def test_stream_anonymous_flow_unchanged_when_no_principal_ever_sent(
         json={"message": "hi", "thread_id": "legacy-session", "mcp_session_id": "mcp-x"},
     )
     assert resp.status_code == 200
-    assert owner_pool.owners["legacy-session"] == ("mcp-x", "session")
+    assert owner_pool.owners["legacy-session"] == (
+        main._hash_mcp_session_id("mcp-x"),
+        "session_hash",
+    )
 
     resp = client.post(
         "/agent/stream",
@@ -451,7 +558,10 @@ def test_lazy_migration_rebinds_session_owned_thread_to_principal_once(
         json={"message": "hi", "thread_id": "migrate-t1", "mcp_session_id": "mcp-orig"},
     )
     assert resp.status_code == 200
-    assert owner_pool.owners["migrate-t1"] == ("mcp-orig", "session")
+    assert owner_pool.owners["migrate-t1"] == (
+        main._hash_mcp_session_id("mcp-orig"),
+        "session_hash",
+    )
 
     # 2) The rightful session now starts sending a principal -> lazy rebind.
     resp = client.post(
@@ -543,6 +653,91 @@ def test_stream_rejects_oversized_message(monkeypatch: pytest.MonkeyPatch, clien
     huge = "x" * (config.AGENT_MAX_MESSAGE_CHARS + 1)
     resp = client.post("/agent/stream", json={"message": huge, "thread_id": "t1"})
     assert resp.status_code == 422
+
+
+def test_agent_boundaries_reject_bad_ids_and_oversized_raw_body(client: TestClient):
+    bad_thread = client.post(
+        "/agent/stream",
+        json={"message": "hi", "thread_id": "bad/thread"},
+    )
+    bad_session = client.post(
+        "/agent/stream",
+        json={"message": "hi", "thread_id": "t1", "mcp_session_id": "x" * 129},
+    )
+    raw_oversized = client.post(
+        "/agent/stream",
+        content=b"{" + b" " * config.AGENT_MAX_REQUEST_BYTES,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert bad_thread.status_code == 422
+    assert bad_session.status_code == 422
+    assert raw_oversized.status_code == 413
+
+
+def test_signed_rate_identity_is_verified_and_spoofed_forwarding_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(config, "AGENT_API_KEY", "shared-key")
+    client_id = "a" * 64
+    signature = main.hmac.new(
+        b"shared-key",
+        f"v1:{client_id}".encode(),
+        main.hashlib.sha256,
+    ).hexdigest()
+
+    trusted = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"x-agent-client-id", client_id.encode()),
+                (b"x-agent-client-signature", signature.encode()),
+                (b"x-forwarded-for", b"198.51.100.2"),
+            ],
+            "client": ("127.0.0.1", 1234),
+        }
+    )
+    spoofed = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-forwarded-for", b"203.0.113.9")],
+            "client": ("127.0.0.1", 1234),
+        }
+    )
+
+    assert main._rate_limit_identity(trusted) == f"proxy:{client_id}"
+    assert main._rate_limit_identity(spoofed) == "socket:127.0.0.1"
+
+
+def test_delete_thread_requires_owner_and_removes_checkpoint_rows(
+    client: TestClient,
+    owner_pool: _FakeOwnerPool,
+):
+    created = client.post(
+        "/agent/stream",
+        json={"message": "hi", "thread_id": "delete-t1", "mcp_session_id": "mcp-a"},
+    )
+    denied = client.request(
+        "DELETE",
+        "/agent/threads/delete-t1",
+        json={"mcp_session_id": "mcp-b"},
+    )
+    deleted = client.request(
+        "DELETE",
+        "/agent/threads/delete-t1",
+        json={"mcp_session_id": "mcp-a"},
+    )
+
+    assert created.status_code == 200
+    assert denied.status_code == 403
+    assert deleted.status_code == 204
+    assert owner_pool.owners["delete-t1"] == (None, "deleted")
+
+    blocked_recreation = client.post(
+        "/agent/stream",
+        json={"message": "again", "thread_id": "delete-t1", "mcp_session_id": "mcp-a"},
+    )
+    assert blocked_recreation.status_code == 410
 
 
 async def test_stream_graph_hides_exception_detail(monkeypatch: pytest.MonkeyPatch):

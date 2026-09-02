@@ -27,7 +27,7 @@ from ssu_agent.agents.react_loop import (
     run_react_loop,
 )
 from ssu_agent.llm_factory import create_llm, get_llm_sequence
-from ssu_agent.supervisor.state import SsuAgentState
+from ssu_agent.supervisor.state import SsuAgentState, request_mcp_session_id
 from ssu_agent.tool_results import content_to_text
 
 _SYSTEM_PROMPT_BASE = """당신은 숭실대학교 학사 정보 전문 AI 어시스턴트입니다.
@@ -190,7 +190,7 @@ def build_academic_agent(
         llm_seq = [create_llm()]
 
     async def agent_node(state: SsuAgentState, config: RunnableConfig) -> dict:
-        mcp_session_id = state.get("mcp_session_id")
+        mcp_session_id = request_mcp_session_id(state)
         requires_private_data = _requires_private_academic_context(state.get("messages", []))
         confirmed_session_id: str | None = None
         provider_state: ProviderLinkState | None = None

@@ -21,6 +21,8 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret-template: {{ include (print $.Template.BasePath "/secret.example.yaml") . | sha256sum }}
+        secret-rollout-version: {{ .Values.secretRef.rolloutVersion | quote }}
       labels:
         {{- include "ssu-agent.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/part-of: ssuai
