@@ -107,13 +107,9 @@ assistant-only parser로 지원 범위를 HTTP(S) 링크에 한정해 번들·�
 사용자가 전체 강의자료 요청을 한 번 보내고, 두 단계 상태 뒤 다운로드 action이 나타나는지와 해당
 action이 ssuMCP의 polling 페이지를 여는지만 확인한다.
 
-## 남은 위험과 면접 질문
+## 남은 위험
 
 외부 LMS course/material 수집 자체가 60초를 넘으면 confirm 이전에 프록시가 종료될 수 있다. 이번
 결정은 불필요한 수퍼바이저·도구·최종 모델 왕복을 제거하지만 upstream의 절대 지연을 없애지는 않는다.
 이 경우 장기 대안은 export 요청 접수 자체를 짧은 비동기 API로 분리하고 job 상태를 별도 event로
 보내는 것이다.
-
-- capability URL을 LLM 최종 문장에 맡기지 않은 이유는 무엇인가?
-- 전체 내보내기만 단축 도구로 보내고 특정 과목 흐름은 유지한 이유는 무엇인가?
-- raw tool output을 SSE로 전달하지 않고 terminal formatter를 둔 보안상 이유는 무엇인가?
