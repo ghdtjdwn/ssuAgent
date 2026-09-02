@@ -36,14 +36,6 @@ ssuMCP ADR 0061의 통제를 ssuAgent로 포팅한다. **API 키 인증 활성�
 - 의존성: `slowapi>=0.1.9` 추가 → `uv.lock` 재생성(Dockerfile이 `uv sync --frozen`이라 lock 동기 필수). `limits` 전이 의존성 포함.
 - 테스트(`test_main_security.py`): 율제한 초과 429(저한도 오버라이드) · 과대 message 422 · `_stream_graph`가 예외 detail 비노출(내부 DSN 미포함, `type:error`만). 기존 6개(키 게이트/health) 보존(기본 fixture가 limiter 비활성).
 
-## 예상 면접 질문
-
-1. **"폴리글랏 MSA에서 보안 통제를 어떻게 일관 적용했나?"** — ssuMCP(Java)에 ADR 0061로 적용한 per-IP rate-limit·입력 상한·에러 비노출을 ssuAgent(Python)에 동일 의도로 포팅. "코어엔 했는데 형제 서비스엔 안 한" 갭을 분석으로 잡아 메웠고, before/after를 코드로 보여줄 수 있다.
-2. **"ingress 뒤에서 per-IP rate-limit를 어떻게 정확히 하나?"** — `request.client.host`는 ingress IP라 전역 1버킷이 된다. X-Forwarded-For 좌측 홉(실클라이언트)을 키로 써야 IP별 분리. ssuMCP `ClientIpResolver`와 동일.
-3. **"왜 API 키 인증을 지금 안 켰나?"** — 브라우저 직접 호출이라 클라 키 노출. 서버사이드 프록시가 선결이라 별도 후속. 비용/DoS 즉시 위험은 rate-limit로 더 작은 변경으로 차단(우선순위 판단).
-
----
-
 ## 갱신 (2026-07-02) — 후속(S1-b: API 키 인증 활성화 + Next 프록시) 완료
 
 "별도 후속"으로 남겼던 API 키 인증 활성화는 **2026-06-30 완료**됐다:

@@ -170,14 +170,3 @@ FastAPI 요청마다 최신 `mcp_session_id`를 state에 주입하므로, 동일
 | 체크포인터 | `langgraph-checkpoint-sqlite 3.1.0` (SQLite, 앱 lifespan 관리) |
 
 ---
-
-## 9. 예상 면접 질문
-
-1. **"수퍼바이저 패턴에서 핸드오프를 어떻게 구현했나요? Command를 반환하는 도구를 왜 안 썼나요?"**  
-   → 최초 구현 당시 LangGraph 1.2.4의 `create_react_agent`는 도구 반환값을 부모 그래프의 전이로 사용할 수 없었다. 현재는 지원되는 `create_agent`로 교체했지만, 부모 그래프가 전이와 상태 소유권을 명시적으로 유지하도록 `"ROUTE_TO:X"` 마커와 `post_supervisor` 패턴을 보존했다.
-
-2. **"HITL을 구현할 때 `interrupt()`를 어디에 놓아야 하는지, 그리고 왜 그 위치여야 하는지 설명해주세요."**  
-   → LangGraph는 노드 경계에서 상태를 체크포인트한다. 라우터 함수(conditional edge)는 체크포인트 경계가 아니므로 거기서 `interrupt()`를 호출하면 상태 저장 없이 실패한다. `interrupt()`는 반드시 `add_node`로 등록된 노드 함수 안에서 호출해야 한다.
-
-3. **"thread_id와 mcp_session_id를 분리한 이유는 무엇인가요?"**  
-   → `thread_id`는 LangGraph의 대화 지속성 키로 클라이언트당 고정된다. `mcp_session_id`는 외부 시스템(ssuMCP)의 인증 토큰으로 만료·재발급이 가능하다. 동일 대화(thread)에서 재로그인 후 세션만 갱신하는 시나리오를 지원하려면 두 값을 독립적으로 관리해야 한다.
