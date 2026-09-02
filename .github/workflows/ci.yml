@@ -49,7 +49,19 @@ jobs:
       - name: Render and verify Pod token mount
         run: |
           helm template ssu-agent deploy/charts/ssu-agent --namespace ssuai-prod > rendered.yaml
-          grep -F 'automountServiceAccountToken: false' rendered.yaml
+          ruby -ryaml - <<'RUBY'
+          documents = YAML.load_stream(File.read("rendered.yaml"))
+          deployment = documents.find do |document|
+            document.is_a?(Hash) &&
+              document["apiVersion"] == "apps/v1" &&
+              document["kind"] == "Deployment" &&
+              document.dig("metadata", "name") == "ssu-agent"
+          end
+          abort("ssu-agent Deployment not found") unless deployment
+
+          value = deployment.dig("spec", "template", "spec", "automountServiceAccountToken")
+          abort("automountServiceAccountToken must be boolean false, got #{value.inspect}") unless value == false
+          RUBY
 
   docker-verify:
     name: Agent image verification (ARM64)
