@@ -9,14 +9,14 @@
 
 ---
 
-## 배경 — 무엇이 문제인가 (4-service 감사 B1)
+## 배경 — 무엇이 문제인가
 
 ADR 0010은 `thread_owners(thread_id, owner, created_at)` 테이블로 IDOR(다른 사람의 `thread_id`를 알면 대화를 훔쳐볼 수 있는 문제)는 막았지만, `owner`로 저장한 값이 **`mcp_session_id`** 였다. 그런데 `mcp_session_id`는 ssuAI 로그인 흐름에서 **재로그인마다 새로 발급되는 회전 값**이다(`McpWebSessionController.create`가 매 호출마다 `mcpAuthService.createSession()`으로 **무조건 새 세션**을 만든다 — 같은 학번이어도 재사용하지 않음, 확인 완료).
 
 결과:
 1. 사용자가 로그아웃 후 재로그인하면 `mcp_session_id`가 바뀌어 이전 대화 thread의 owner와 더 이상 일치하지 않는다 → 대화 히스토리가 **영구적으로 orphan** 된다(ADR 0010이 완화책으로 로그아웃 시 `sessionStorage["ssuagent_thread_id"]`를 지우게 했지만, 이는 403 에러를 피할 뿐 — 새 빈 thread로 시작하게 만들어 **히스토리 접근 자체를 포기**시키는 것이다).
 2. 같은 사용자가 다른 기기에서 접속하면 별도 `mcp_session_id`가 발급되므로 대화를 공유할 수 없다.
-3. 익명(비로그인) 경로는 ADR 0010에서 이미 "owner NULL → 아무나 접근 가능"으로 설계되어 있는데, 이건 의도된 것이지만 감사 관점에서는 여전히 "누구든 읽을 수 있는 IDOR 표면"으로 다시 지적될 수 있다 — 이번 작업에서 그 계약을 문서로 명확히 하고 회귀 테스트로 고정한다.
+3. 익명(비로그인) 경로는 ADR 0010에서 이미 "owner NULL → 아무나 접근 가능"으로 설계되어 있는데, 이건 의도된 것이지만 여전히 "누구든 읽을 수 있는 IDOR 표면"으로 해석될 수 있다 — 이 결정에서 그 계약을 문서로 명확히 하고 회귀 테스트로 고정한다.
 
 ## 탐색 — ssuAgent가 스스로 안정 principal을 구할 수 있는가?
 
@@ -25,7 +25,7 @@ ADR 0010은 `thread_owners(thread_id, owner, created_at)` 테이블로 IDOR(다�
 - **ssuMCP `get_auth_status`**: `McpAuthMcpTools.getAuthStatus` 및 `McpAuthStatusResponse`의 Javadoc이 명시적으로 **"Student id / principalKey is never included"** 라고 선언한다. 응답은 `status`/`mcpSessionId`(입력과 동일한 값의 echo)/`providers`(연동 여부 불리언)뿐이다. 즉 ssuAgent가 이 도구를 직접 호출해도(그래프 밖에서 `MultiServerMCPClient` 툴을 직접 `ainvoke`하는 패턴은 `library.py`의 `confirm_tool.ainvoke`에 이미 있어 기술적으로는 가능) **얻을 수 있는 안정 식별자가 없다** — 이건 버그가 아니라 ssuMCP의 의도된 프라이버시 경계다.
 - **ssuAI → ssuAgent 프록시**: `ssuAI/lib/server/agentProxy.ts`는 `{message, thread_id, mcp_session_id}`만 그대로 전달하고, 서비스 간 공유 크리덴셜(`X-Agent-Key`) 외에 **사용자 JWT/식별자는 일절 전달하지 않는다**. ssuAI 자체는 SmartID SSO로 발급한 JWT에 `studentId`를 담아 갖고 있지만(`lib/api/auth.ts`), 그 값이 ssuAgent에 도달하는 배선은 현재 존재하지 않는다.
 
-결론: **ssuAgent 저장소만으로는 안정 principal을 자체적으로 만들어낼 방법이 없다.** 이걸 만들려면 ssuMCP의 응답 스키마(프라이버시 경계 변경) 또는 ssuAI의 프록시 배선(신규 필드) 중 하나를 반드시 바꿔야 하는데, 둘 다 이번 작업의 범위(ssuAgent 저장소 단독) 밖이다.
+결론: **ssuAgent 저장소만으로는 안정 principal을 자체적으로 만들어낼 방법이 없다.** 이걸 만들려면 ssuMCP의 응답 스키마(프라이버시 경계 변경) 또는 ssuAI의 프록시 배선(신규 필드) 중 하나를 반드시 바꿔야 하는데, 둘 다 이 결정의 범위(ssuAgent 저장소 단독) 밖이다.
 
 ## 대안 비교
 
@@ -33,13 +33,13 @@ ADR 0010은 `thread_owners(thread_id, owner, created_at)` 테이블로 IDOR(다�
 
 세션 claim 시점에 ssuMCP `get_auth_status(mcp_session_id)`를 직접 호출해 학번을 얻고, 그 값으로 바인딩.
 
-**기각.** 위 탐색에서 확인했듯 `get_auth_status`는 학번/principalKey를 **의도적으로** 반환하지 않는다(프라이버시 설계, ssuMCP 자체 문서화됨). 이를 되돌리려면 ssuMCP DTO를 바꿔야 하는데, 이는 "새 인증 인프라를 만들지 않는다"는 이번 작업의 제약과 "ssuAgent 저장소 단독 작업" 범위 둘 다를 위반한다. 설령 바꾸더라도 매 `/agent/stream` 호출마다 ssuMCP로 왕복 호출이 추가되어(가용성 의존 + 지연 추가) A의 "실패 시 세션 바인딩으로 폴백" 요구사항 자체가 새로운 장애 모드를 만든다.
+**기각.** 위 탐색에서 확인했듯 `get_auth_status`는 학번/principalKey를 **의도적으로** 반환하지 않는다(프라이버시 설계, ssuMCP 자체 문서화됨). 이를 되돌리려면 ssuMCP DTO를 바꿔야 하는데, 이는 "새 인증 인프라를 만들지 않는다"는 제약과 "ssuAgent 저장소 단독 변경" 범위 둘 다를 위반한다. 설령 바꾸더라도 매 `/agent/stream` 호출마다 ssuMCP로 왕복 호출이 추가되어(가용성 의존 + 지연 추가) A의 "실패 시 세션 바인딩으로 폴백" 요구사항 자체가 새로운 장애 모드를 만든다.
 
 ### B. 프론트엔드가 안정 subject(JWT sub/학번)를 함께 보내는 구조를 ssuAgent가 수용
 
 ssuAI가 이미 보유한 안정 식별자(`studentId`, SmartID JWT 기반)를 요청 바디의 새 필드로 실어 보내고, ssuAgent는 그 값이 있으면 우선 사용하고 없으면 기존 세션 바인딩으로 폴백.
 
-**채택.** ssuAI 쪽 전달 배선은 아직 없지만(확인됨), 그 값 자체는 이미 ssuAI 안에 존재하는 기존 인증 결과다 — 즉 "새 인증 인프라"가 아니라 "이미 있는 안정 식별자를 한 단계 더 전달"하는 배선 문제다. ADR 0010도 정확히 이런 2-repo 협업 패턴이었다(ssuAgent 테이블+검증 / ssuAI 로그아웃 시 정리, 별도 PR). 이번 유닛은 그 전례를 따라 **ssuAgent 측 절반**을 구현한다: 필드를 선제적으로 수용하고, 절대 필수로 만들지 않으며(부재 시 채팅이 절대 깨지지 않음), 저장 시 해시(아래 참고)해 원문을 보관하지 않는다. ssuAI가 이 필드를 채워 보내기 시작하는 순간 즉시 활성화된다 — 별도 ssuAgent 배포 불필요.
+**채택.** ssuAI 쪽 전달 배선은 아직 없지만(확인됨), 그 값 자체는 이미 ssuAI 안에 존재하는 기존 인증 결과다 — 즉 "새 인증 인프라"가 아니라 "이미 있는 안정 식별자를 한 단계 더 전달"하는 배선 문제다. ADR 0010도 정확히 이런 2-repo 협업 패턴이었다(ssuAgent 테이블+검증 / ssuAI 로그아웃 시 정리, 별도 PR). 이 구현은 그 전례를 따라 **ssuAgent 측 절반**을 맡는다: 필드를 선제적으로 수용하고, 절대 필수로 만들지 않으며(부재 시 채팅이 절대 깨지지 않음), 저장 시 해시(아래 참고)해 원문을 보관하지 않는다. ssuAI가 이 필드를 채워 보내기 시작하는 순간 즉시 활성화된다 — 별도 ssuAgent 배포 불필요.
 
 ### C. 하이브리드(인증 시 principal, 익명 시 세션 유지)
 
