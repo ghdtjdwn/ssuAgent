@@ -31,5 +31,17 @@ updates:
       prefix: chore(deps)
       include: scope
 
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+
 # Major versions remain separate PRs for compatibility review. Security updates
 # are filed outside the weekly version-update schedule.
