@@ -1181,7 +1181,7 @@ async def _stream_graph(
         logger.warning("agent stream failed: type=%s", type(exc).__name__)
         # LLM providers (free-tier or the optional paid Anthropic key, ADR 0015) are
         # frequently rate-limited/quota-exhausted (429). Surface a clear, honest message
-        # for that case instead of a generic "error" so users (and portfolio viewers)
+        # for that case instead of a generic "error" so users and operators
         # understand it is a capacity limit, not a crash. Message deliberately does not
         # say "무료" (free) — it must stay accurate whichever provider tier is active.
         # Message is still a fixed string — no exception detail is leaked.

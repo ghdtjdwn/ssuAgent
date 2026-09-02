@@ -20,7 +20,7 @@ Gemini Free Tier는 RPD(일별 요청수), RPM(분당 요청수), TPM(분당 토
 
 ### 대안 B: 유료 Gemini API 티어로 전환
 - 쿼타 걱정 없이 사용 가능
-- **문제**: 포트폴리오 프로젝트에서 LLM API 비용이 예측 불가능하게 발생할 수 있음. 또한 이미 다른 프로바이더의 API 키(Groq, OpenRouter 등)가 ssuMCP에 등록되어 있는데 활용하지 않는 것은 비효율
+- **문제**: 프로젝트 프로젝트에서 LLM API 비용이 예측 불가능하게 발생할 수 있음. 또한 이미 다른 프로바이더의 API 키(Groq, OpenRouter 등)가 ssuMCP에 등록되어 있는데 활용하지 않는 것은 비효율
 
 ### 대안 C (채택): LangChain `.with_fallbacks()` 로 멀티 프로바이더 체인
 - LangChain의 `RunnableWithFallbacks` 패턴으로 primary LLM 실패 시 자동으로 다음 프로바이더로 전환
@@ -80,12 +80,6 @@ create_llm() 반환값:
 - `ssu_agent/config.py` (`GROQ_API_KEY`, `OPENROUTER_API_KEY` 추가)
 - `pyproject.toml`, `uv.lock` (`langchain-openai` 추가)
 - 커밋: `2541aa8` (feat), `5e36c10` (lint fix)
-
-## 예상 면접 질문
-
-1. LangChain `.with_fallbacks()`의 동작 원리는? 어떤 예외가 발생했을 때 fallback이 트리거되나요?
-2. `max_retries=1`로 설정한 이유는? 기본값과 비교해 트레이드오프는?
-3. 여러 LLM 프로바이더를 사용할 때 응답 포맷(특히 tool calling) 차이를 어떻게 처리하나요?
 
 ## 갱신 (2026-07-02) — 실제 출하 구현과의 차이
 
