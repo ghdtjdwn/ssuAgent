@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/ci.yml)
 [![Security](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/security.yml/badge.svg)](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/security.yml)
+[![CodeQL](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/codeql.yml/badge.svg)](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/codeql.yml)
 
 **한국어** · [English](README.en.md)
 
@@ -39,11 +40,14 @@ browser
 - Supervisor는 현재 사용자 turn을 도메인 specialist로 라우팅하고, specialist는 필요한 MCP 도구만
   동적으로 로드한다.
 - LangGraph PostgreSQL checkpointer가 대화와 interrupt 상태를 저장한다. 검증된 principal의 hash와
-  `thread_id`를 결합해 다른 사용자의 checkpoint 읽기·resume을 차단한다.
+  `thread_id`를 결합해 다른 사용자의 checkpoint 읽기·resume·삭제를 차단한다. MCP bearer capability는
+  요청 실행 context에만 두고 checkpoint에는 저장하지 않는다.
 - 도서관 write는 `prepare_*` 결과에서 graph를 interrupt하고, ssuAI의 명시적 승인 이후에만
   `confirm_action`으로 재개한다.
 - 설정된 provider만 Anthropic → Groq → Gemini → OpenRouter 순서로 시도한다. 각 agent의 수동
-  `bind_tools` loop가 provider별 tool-call 차이와 fallback을 통제한다.
+  `bind_tools` loop가 provider별 tool-call 차이와 fallback을 통제한다. Groq는 tool-call turn의
+  content 호환성 때문에 범용 `ChatOpenAI` 대신 `ChatGroq`를 사용한다. 가격·모델 제공 여부·조직별
+  한도는 외부 runtime constraint이며, 이 순서는 비용이나 정확도 우위를 뜻하지 않는다.
 
 요청·신뢰·상태 경계와 현재 단일 replica 제약은 [아키텍처 문서](docs/architecture.md)에 정리했다.
 
@@ -52,11 +56,14 @@ browser
 | 문제 | 구현과 검증 근거 |
 | --- | --- |
 | 다른 사용자가 기존 대화를 resume할 위험 | stable principal hash와 thread owner binding — [ADR 0010](docs/adr/0010-agent-thread-ownership-binding.md) · [security tests](tests/test_main_security.py) |
+| 장기 checkpoint의 capability·개인 데이터 노출 | request-scoped MCP capability, 소유권 검증 삭제 API, 30일 bounded retention — [ADR 0023](docs/adr/0023-conversation-lifecycle-and-edge-identity.md) |
+| proxy egress가 하나의 rate-limit bucket을 공유하는 문제 | BFF가 서명한 principal/IP pseudonym을 검증해 사용자별 bucket 선택 — [edge tests](tests/test_main_security.py) |
 | stream 재연결 또는 interrupt 뒤 resume 계약 오류 | stable thread와 명시적 `resume` event ordering — [stream contract tests](tests/test_stream_interrupt.py) |
 | 명확한 LMS export가 추가 LLM turn에서 timeout되는 문제 | 보수적 직접 라우팅과 결정적 링크 생성 — [ADR 0022](docs/adr/0022-deterministic-lms-export-download.md) · [LMS tests](tests/test_lms_agent.py) |
 | provider별 tool-call 형식 차이와 장애 전파 | 설정 기반 provider sequence와 agent-local fallback — [factory tests](tests/test_llm_factory.py) · [ADR 0004](docs/adr/004-multi-provider-llm-fallback.md) |
 | handoff가 답변을 중복하거나 잘못된 도구를 고르는 문제 | routing/safety 평가 세트 — [routing eval](tests/test_eval_routing.py) · [safety eval](tests/test_eval_safety.py) |
 | 검증되지 않은 이미지의 자동 배포 | Ruff·format·pytest 뒤 ARM64 image publish — [CI workflow](.github/workflows/ci.yml) · [deployment guide](docs/deploy.md) |
+| 정적 보안 회귀와 stale dependency | CodeQL v4 Python 분석, uv·GitHub Actions Dependabot — [CodeQL](.github/workflows/codeql.yml) · [Dependabot](.github/dependabot.yml) |
 
 주요 스택은 Python 3.12, FastAPI, LangGraph, LangChain, PostgreSQL checkpointer, MCP Streamable
 HTTP, SSE, uv, Ruff, pytest, Docker, Helm과 ArgoCD다.
@@ -79,9 +86,20 @@ uv run uvicorn ssu_agent.main:app --host 0.0.0.0 --port 8000
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest
+uv run pytest tests/test_eval_routing.py
 ```
 
 환경 변수의 보안 의미와 운영 차이는 [설정 문서](docs/configuration.md)에 있다.
+
+Supervisor 라우팅 계약은 `evals/routing_contract.v1.json`의 버전 고정 corpus와
+실패 분류를 사용한다. 이 평가는 모델이 도구를 선택한 뒤의 실제 라우팅 도구,
+marker parser, graph 목적지를 검증하며 외부 LLM을 호출하지 않는다. 따라서 결과를
+live-model 라우팅 정확도로 해석하지 않는다. 경계와 재현 방법은
+`evals/README.md`에 기록했다.
+
+corpus는 9개 질의(도메인 라우팅 6, 직접 응답 3)와 네 가지 실패 유형을 포함한다.
+외부 프로바이더나 로컬 모델을 이용한 정확도 평가는 실행하지 않았으므로, 결과는 LLM 선택
+정확도가 아니라 결정론적 후속 라우팅 계약의 회귀 근거다.
 
 ## 문서
 
@@ -89,12 +107,14 @@ uv run pytest
 - [아키텍처와 신뢰 경계](docs/architecture.md)
 - [설정과 환경 변수](docs/configuration.md)
 - [GitOps 배포와 운영 검증](docs/deploy.md)
+- [운영 장애 기록](docs/troubleshooting.md)
 - [ADR 목록](docs/adr/)
 
 ## 범위와 제약
 
 - 현재 production은 단일 replica이고 inbound rate limit은 process-local이다. scale-out 전에 shared
-  limiter와 checkpoint 동시성 검증이 필요하다.
+  limiter가 필요하다. 서명된 identity는 현재 pod 안에서 사용자를 정확히 나누지만 replica 간 counter를
+  공유하지 않는다.
 - CI의 stream/HITL 단위 테스트는 `MemorySaver`를 사용한다. 실제 PostgreSQL을 재시작한 뒤 resume하는
   container integration test는 현재 gate에 포함되지 않는다.
 - LLM과 학교 시스템의 가용성에 의존한다. 도구 실패 시 응답을 추측하지 않고 제한이나 연결 필요 상태를

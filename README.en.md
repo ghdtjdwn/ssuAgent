@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/ci.yml)
 [![Security](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/security.yml/badge.svg)](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/security.yml)
+[![CodeQL](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/codeql.yml/badge.svg)](https://github.com/ghdtjdwn/ssuAgent/actions/workflows/codeql.yml)
 
 [한국어](README.md) · **English**
 
@@ -40,11 +41,15 @@ browser
 - The supervisor routes the current user turn to a domain specialist; each specialist loads only
   the MCP tools it needs.
 - A LangGraph PostgreSQL checkpointer persists conversations and interrupts. The verified principal
-  hash is bound to `thread_id`, preventing another user from reading or resuming the checkpoint.
+  hash is bound to `thread_id`, preventing another user from reading, resuming, or deleting it. The
+  live MCP bearer capability stays in request context and is not checkpointed.
 - Library writes interrupt after `prepare_*` and resume with `confirm_action` only after explicit
   approval in ssuAI.
 - Only configured providers join the Anthropic → Groq → Gemini → OpenRouter sequence. Each agent's
-  manual `bind_tools` loop controls provider-specific tool-call differences and fallback.
+  manual `bind_tools` loop controls provider-specific tool-call differences and fallback. Groq uses
+  `ChatGroq` instead of the generic `ChatOpenAI` wrapper for tool-call content compatibility.
+  Pricing, model availability, and organization quotas are external runtime constraints; this order
+  does not claim a cost or accuracy advantage.
 
 See the [architecture document](docs/architecture.md) for request, trust, and state boundaries and
 the current single-replica constraint.
@@ -54,11 +59,13 @@ the current single-replica constraint.
 | Problem | Implementation and verification |
 | --- | --- |
 | Another user resuming an existing conversation | Stable principal hash and thread-owner binding — [ADR 0010](docs/adr/0010-agent-thread-ownership-binding.md) · [security tests](tests/test_main_security.py) |
+| Long-lived checkpoints retaining capabilities or personal data | Request-scoped capabilities, ownership-checked deletion, and bounded 30-day retention — [ADR 0023](docs/adr/0023-conversation-lifecycle-and-edge-identity.md) |
 | Broken resume semantics after stream reconnect or interrupt | Stable thread and explicit `resume` event ordering — [stream contract tests](tests/test_stream_interrupt.py) |
 | A clear LMS export timing out in another LLM turn | Conservative direct routing and deterministic link generation — [ADR 0022](docs/adr/0022-deterministic-lms-export-download.md) · [LMS tests](tests/test_lms_agent.py) |
 | Provider-specific tool-call formats and cascading failures | Configuration-driven provider sequence and agent-local fallback — [factory tests](tests/test_llm_factory.py) · [ADR 0004](docs/adr/004-multi-provider-llm-fallback.md) |
 | Handoffs duplicating answers or choosing the wrong tool | Routing and safety evaluation sets — [routing eval](tests/test_eval_routing.py) · [safety eval](tests/test_eval_safety.py) |
 | Deployment of an unverified image | ARM64 image publication follows Ruff, formatting, and pytest — [CI workflow](.github/workflows/ci.yml) · [deployment guide](docs/deploy.md) |
+| Static security regressions and stale dependencies | CodeQL v4 Python analysis plus uv and GitHub Actions Dependabot — [CodeQL](.github/workflows/codeql.yml) · [Dependabot](.github/dependabot.yml) |
 
 The main stack is Python 3.12, FastAPI, LangGraph, LangChain, PostgreSQL checkpointer, MCP
 Streamable HTTP, SSE, uv, Ruff, pytest, Docker, Helm, and ArgoCD.
@@ -82,10 +89,17 @@ uv run uvicorn ssu_agent.main:app --host 0.0.0.0 --port 8000
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest
+uv run pytest tests/test_eval_routing.py
 ```
 
 See the [configuration guide](docs/configuration.md) for each variable's security meaning and the
 difference between local and production settings.
+
+The versioned routing corpus contains nine prompts: six domain handoffs and
+three direct answers, classified against four failure types. The test uses a fake chat model while
+executing the real routing tools, markers, parser, and graph destinations after tool selection. It
+is not a live-model tool-selection accuracy result. See [`evals/README.md`](evals/README.md) for the
+evidence boundary.
 
 ## Documentation
 
@@ -97,8 +111,8 @@ difference between local and production settings.
 
 ## Scope and limitations
 
-- Production currently runs one replica and inbound rate limiting is process-local. A shared limiter
-  and checkpoint concurrency verification are required before scaling out.
+- Production currently runs one replica and inbound rate limiting is process-local. Signed client
+  identities provide correct per-user buckets within that process; scale-out still needs a shared store.
 - CI stream/HITL unit tests use `MemorySaver`; the current gate does not include a container-backed
   restart-and-resume test against real PostgreSQL.
 - The service depends on LLM providers and university systems. On tool failure, it reports the

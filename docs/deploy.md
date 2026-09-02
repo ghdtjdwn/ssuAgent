@@ -42,11 +42,17 @@ image와 health를 모두 확인해야 한다.
 - production target은 ARM64 k3s와 `ssuai-prod` namespace다.
 - LangGraph checkpoint와 thread owner는 기존 PostgreSQL에 저장한다. pod filesystem은 대화 상태의
   source of truth가 아니다.
+- 새 image는 readiness 전에 legacy `mcp_session_id` checkpoint channel을 bounded batch로 치환하고
+  checkpoint lifecycle trigger를 설치한다. 기본 100,000-row 안전 상한을 넘으면 startup이 실패하므로
+  rollout 전에 실제 legacy row 수를 확인하거나 `AGENT_CAPABILITY_SCRUB_MAX_ROWS`를 계획적으로 높인다.
+  scrub과 retention/delete는 owner → checkpoint lock order를 공유하므로 rolling 중 cleanup과 경합해도
+  교착 없이 한쪽이 owner lock에서 대기한다.
 - `ssuagent-secrets`는 최소 `DATABASE_URL`, `AGENT_API_KEY`, 한 개 이상의 LLM provider key를
   포함한다. 값은 Git에 두지 않는다.
 - production은 `AGENT_API_KEY_REQUIRED=true`, 실제 frontend origin allow-list, non-optional Secret을
   사용한다.
-- readiness/liveness는 `/health`, upstream MCP까지 포함한 운영 점검은 `/healthz/deep`을 사용한다.
+- liveness는 shallow `/health`, readiness는 PostgreSQL pool과 checkpointer table을 bounded query로 확인하는
+  `/ready`, upstream MCP 진단은 `/healthz/deep`을 사용한다.
 
 Secret key 이름과 선택 provider는 Helm의
 [`secret.example.yaml`](../deploy/charts/ssu-agent/templates/secret.example.yaml)을 참고한다. 실제 값을
@@ -65,8 +71,55 @@ Secret key 이름과 선택 provider는 Helm의
 7. `/health`와 `/healthz/deep`이 `UP`인지 확인
 8. direct no-key `/agent/stream`이 401이고, ssuAI server proxy 경로가 계약에 맞는 상태 코드를
    반환하는지 확인
+9. `/ready`가 `postgres=UP`, `checkpointer=UP`인지 확인
+10. startup log의 `legacy checkpoint capability scrubbed N row(s)`를 확인하고 pod 재시작 후 같은 log가
+    다시 나오지 않는지(idempotent 0건) 확인
+
+Secret을 회전할 때는 값을 바꾸는 작업과 같은 GitOps 변경에서
+`values.yaml`의 `secretRef.rolloutVersion`을 증가시킨다. 이 값은 pod-template annotation이므로 Deployment
+새 revision과 rolling restart를 만든다. chart가 직접 Secret을 렌더링하는 환경은 Secret template checksum도
+rollout을 유발한다. external Secret 값만 cluster에서 바꾸고 rolloutVersion을 그대로 두면 envFrom 값은 실행
+중인 process에 반영되지 않는다.
+
+rollback한 이전 image도 additive trigger가 exact legacy capability channel을 DB 저장 전에 `None`으로
+정규화하고 삭제 fence를 유지한다. hardened image를 다시 배포하면 startup scrub을 idempotent하게 다시
+통과한다. scrub 상한 실패는 DB row를 일부 치환한 상태여도 안전하게 재실행할 수 있으므로 상한만 올려
+rollout을 재시도한다.
 
 문서-only 변경은 CI의 `paths-ignore` 대상이므로 새 image나 rollout이 생기지 않는 것이 정상이다.
+
+## 2026-07-18 릴리스 증거
+
+라우팅 평가 계약을 추가한 pull request
+[#65](https://github.com/ghdtjdwn/ssuAgent/pull/65)는 main commit
+`b1f88e339f6ae081d9580d271747404cfe989721`로 머지됐다. 같은 commit에 대한
+[main CI](https://github.com/ghdtjdwn/ssuAgent/actions/runs/29646212353)에서 다음 게이트가
+실제로 완료됐다.
+
+- Ruff check와 format check 통과
+- pytest 306개 통과
+- ARM64 image `ghcr.io/ghdtjdwn/ssuagent:sha-b1f88e339f6ae081d9580d271747404cfe989721`
+  build·push 성공
+- 별도 [gitleaks check](https://github.com/ghdtjdwn/ssuAgent/actions/runs/29646212349) 통과
+
+ArgoCD Image Updater는 commit `e40fa68e98658d2b87430f35b7202e8a054f6c2a`로
+`values.yaml`의 기대 image tag를 `sha-b1f88e339f6ae081d9580d271747404cfe989721`로
+write-back했다. 그 후 공개 endpoint의 읽기 전용 probe는 다음과 같았다.
+
+| 점검 | 관찰 결과 |
+| --- | --- |
+| `GET https://ssuagent.duckdns.org/health` | HTTP 200, `status=UP` |
+| `GET https://ssuagent.duckdns.org/healthz/deep` | HTTP 200, `status=UP`, `mcp=UP` |
+
+`/ready`와 새 retention/identity 계약은 이 과거 2026-07-18 증거 이후 추가됐다. production rollout 전
+확인되지 않은 상태이므로 위 표에 소급해 성공으로 기록하지 않는다.
+
+이 증거는 CI image 생성, GitOps 기대 태그 변경, 그리고 점검 시점의 service·MCP
+건강 상태를 각각 확인한다. 다만 ArgoCD와 cluster 관리면은 Tailscale 인증을
+요구해 이 검증에서 Application의 `Synced/Healthy`, Deployment rollout, pod `Ready`·restart
+수, 실제 running container image SHA를 직접 조회하지 못했다. public health와
+Git write-back만으로는 응답한 pod가 해당 SHA를 실행 중임을 증명할 수 없으므로,
+이 릴리스의 직접 확인 범위는 배포 검증 순서 1∼3과 7까지다.
 
 ## Rollback
 
@@ -79,11 +132,12 @@ ArgoCD나 Image Updater 자체가 고장 난 break-glass 상황에서는 먼저 
 
 ## 현재 운영 제약
 
-- replica는 1개다. process-local rate limit 때문에 무검증 scale-out은 사용자별 quota를 보장하지 못한다.
+- replica는 1개다. signed client identity는 pod 내부 사용자 bucket을 정확히 나누지만 process-local counter
+  때문에 무검증 scale-out은 전역 quota를 보장하지 못한다.
 - PostgreSQL checkpointer는 pod 재시작 후 대화를 보존하지만, schema/setup과 connection pool 상태도
   readiness와 별도로 확인해야 한다.
-- `/health`는 process liveness에 가깝다. MCP 연결을 포함한 종단 준비 상태는 `/healthz/deep`이 더 강한
-  근거다.
+- `/health`는 process liveness, `/ready`는 PostgreSQL/checkpointer traffic readiness다. `/healthz/deep`은
+  MCP 진단이며 pod traffic gate에는 포함하지 않아 upstream 장애가 agent pod 재시작으로 번지지 않는다.
 - Secret과 Vercel proxy wiring은 repository CI가 검증하지 못한다.
 
 ## 운영 사례: ArgoCD Application drift

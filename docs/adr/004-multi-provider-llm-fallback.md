@@ -20,7 +20,7 @@ Gemini Free Tier는 RPD(일별 요청수), RPM(분당 요청수), TPM(분당 토
 
 ### 대안 B: 유료 Gemini API 티어로 전환
 - 쿼타 걱정 없이 사용 가능
-- **문제**: 포트폴리오 프로젝트에서 LLM API 비용이 예측 불가능하게 발생할 수 있음. 또한 이미 다른 프로바이더의 API 키(Groq, OpenRouter 등)가 ssuMCP에 등록되어 있는데 활용하지 않는 것은 비효율
+- **문제**: 프로젝트 프로젝트에서 LLM API 비용이 예측 불가능하게 발생할 수 있음. 또한 이미 다른 프로바이더의 API 키(Groq, OpenRouter 등)가 ssuMCP에 등록되어 있는데 활용하지 않는 것은 비효율
 
 ### 대안 C (채택): LangChain `.with_fallbacks()` 로 멀티 프로바이더 체인
 - LangChain의 `RunnableWithFallbacks` 패턴으로 primary LLM 실패 시 자동으로 다음 프로바이더로 전환
@@ -81,12 +81,6 @@ create_llm() 반환값:
 - `pyproject.toml`, `uv.lock` (`langchain-openai` 추가)
 - 커밋: `2541aa8` (feat), `5e36c10` (lint fix)
 
-## 예상 면접 질문
-
-1. LangChain `.with_fallbacks()`의 동작 원리는? 어떤 예외가 발생했을 때 fallback이 트리거되나요?
-2. `max_retries=1`로 설정한 이유는? 기본값과 비교해 트레이드오프는?
-3. 여러 LLM 프로바이더를 사용할 때 응답 포맷(특히 tool calling) 차이를 어떻게 처리하나요?
-
 ## 갱신 (2026-07-02) — 실제 출하 구현과의 차이
 
 위 원문은 채택 시점(2026-06-15)의 설계를 기록한 역사적 문서로 보존한다. 이후 구현 과정에서 세 가지가 바뀌었고, 최종 출하 상태는 다음과 같다 (`ssu_agent/llm_factory.py` 기준):
@@ -97,9 +91,21 @@ create_llm() 반환값:
 
 2. **폴백 순서: Gemini-first → Groq-first**
    - 최종 순서: **Groq(llama-3.3-70b-versatile) → Gemini(`GEMINI_MODEL`, 기본 gemini-2.5-flash) → OpenRouter(meta-llama/llama-3.3-70b-instruct:free)**
-   - 이유: Groq free tier는 14,400 req/day로 Gemini free tier(20 req/day)보다 쿼타가 훨씬 크고 추론 속도도 매우 빠르다. Gemini는 한국어 품질이 높아 2순위로 유지, OpenRouter는 catch-all aggregator로 최후순위 (`llm_factory.py` docstring, README).
+   - 이유: 당시 무료 구간의 요청 여유가 더 크다는 운영 가정과 빠른 추론 속도를 근거로 Groq를 먼저 두었다. 이 비교는 모델·조직·시점에 따라 바뀌는 외부 조건이며 현재 보장값이 아니다. Gemini는 한국어 품질을 고려해 2순위로 유지하고, OpenRouter는 catch-all aggregator로 최후순위에 두었다 (`llm_factory.py` docstring, README, 아래 2026-07-18 갱신).
 
 3. **Groq 클라이언트: `ChatOpenAI`(base_url) → `ChatGroq`**
    - 제네릭 `ChatOpenAI` 래퍼는 assistant content를 content-block 리스트로 직렬화하는데, Groq API가 두 번째 tool call turn에서 이를 400으로 거부한다. `ChatGroq`는 string-content 변환을 내부에서 처리한다 (`fix/chatgroq-message-format`).
 
 프로바이더 순서 회귀는 `tests/test_llm_factory.py`의 provider-order 테스트로 고정된다.
+
+## 갱신 (2026-07-18) — 외부 쿼터를 설계 계약에서 분리
+
+위 2026-07-02 갱신의 무료 쿼터 비교는 당시의 운영 판단 기록이며 현재 보장값이 아니다.
+Groq를 포함한 프로바이더의 모델별 한도, 가격, 제공 여부는 조직과 시점에 따라 바뀌고
+정확한 값은 계정 콘솔이 소유한다. 따라서 README와 `llm_factory.py`에서는 고정 쿼터를
+제거하고, 우선순위·키별 opt-in·실패 시 다음 provider로 이동하는 코드 계약만 남겼다.
+
+현재 순서는 tool-call 호환성과 기존 운영 선택을 보존하기 위한 명시적 정책이다. 비용
+또는 정확도 우위를 뜻하지 않는다. 배포 전에는 공식 provider 문서와 계정 한도를 다시
+확인하고, 모델/버전/데이터셋/비용 경계가 기록된 별도 평가 없이 품질 우위를 주장하지
+않는다.

@@ -23,7 +23,7 @@ from ssu_agent import config as agent_config
 from ssu_agent.agents.auth_guard import ProviderLinkState, check_provider_link, tools_for_model
 from ssu_agent.agents.react_loop import run_react_loop
 from ssu_agent.llm_factory import create_llm, get_llm_sequence
-from ssu_agent.supervisor.state import SsuAgentState
+from ssu_agent.supervisor.state import SsuAgentState, request_mcp_session_id
 
 _SYSTEM_PROMPT_BASE = """당신은 숭실대학교 LMS(Canvas) 전문 AI 어시스턴트입니다.
 
@@ -62,6 +62,11 @@ _LMS_LOGIN_MESSAGE = (
 _LMS_STATUS_UNAVAILABLE_MESSAGE = (
     "LMS 연결 상태를 지금 확인하지 못했어요. 잠시 후 다시 보내거나 화면 상단의 ‘연결’에서 "
     "LMS 상태를 확인해 주세요. 로그인 정보는 채팅에 입력하지 않아도 돼요."
+)
+_LMS_SERVICE_UNAVAILABLE_MESSAGE = (
+    "LMS 연결은 확인됐지만 요청한 정보를 가져오지 못했어요. 잠시 후 다시 보내 주세요. 계속 "
+    "실패하면 화면 상단의 ‘연결’에서 LMS를 다시 연결해 주세요. 로그인 정보는 채팅에 입력하지 "
+    "않아도 돼요."
 )
 _LMS_EXPORT_PATH_RE = re.compile(r"^/api/lms/exports/[^/]+/download$")
 
@@ -173,7 +178,7 @@ def build_lms_agent(
         llm_seq = [create_llm()]
 
     async def agent_node(state: SsuAgentState, config: RunnableConfig) -> dict:
-        mcp_session_id = state.get("mcp_session_id")
+        mcp_session_id = request_mcp_session_id(state)
         if not mcp_session_id:
             return {
                 "messages": [AIMessage(content=f"[LMS 에이전트] {_LMS_LOGIN_MESSAGE}")],
@@ -211,8 +216,10 @@ def build_lms_agent(
             state,
             config,
             auth_required_message=_LMS_LOGIN_MESSAGE,
+            upstream_failure_message=_LMS_SERVICE_UNAVAILABLE_MESSAGE,
             terminal_tool_result_formatter=_format_lms_export_confirmation,
             standalone_tool_names={"confirm_lms_material_export"},
+            private_tool_call_budget=(1 if provider_state is ProviderLinkState.DEGRADED else None),
         )
 
     graph = StateGraph(SsuAgentState)

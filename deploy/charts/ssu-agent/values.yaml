@@ -2,7 +2,7 @@ namespace: ssuai-prod
 replicaCount: 1
 image:
   repository: ghcr.io/ghdtjdwn/ssuagent
-  tag: sha-761841d48792c2805ad8f726aea952b081917752
+  tag: sha-55f4450331c868a4447971fa51a578b9f87ff3f9
   pullPolicy: Always
 nameOverride: ""
 fullnameOverride: ""
@@ -13,10 +13,20 @@ env:
   # unset -> config.py defaulted to "*"; pinned to the prod frontend origin to
   # match ssuMCP's SSUAI_FRONTEND_ORIGIN. ADR 0009 / S1.
   allowedOrigins: "https://ssuai.vercel.app"
+  agentMaxRequestBytes: "32768"
+  conversationRetentionDays: "30"
+  retentionCleanupIntervalSeconds: "3600"
+  retentionCleanupBatchSize: "100"
+  storageTimeoutSeconds: "2"
+  capabilityScrubBatchSize: "500"
+  capabilityScrubMaxRows: "100000"
 secretRef:
   enabled: true
   name: ssuagent-secrets
   optional: false
+  # Increment in the same GitOps change as any externally managed Secret
+  # rotation. The pod-template annotation then forces a rolling restart.
+  rolloutVersion: "1"
 secretTemplate:
   enabled: false
   stringData:
@@ -44,7 +54,7 @@ resources:
     memory: 512Mi
 probes:
   readiness:
-    path: /health
+    path: /ready
     initialDelaySeconds: 10
     periodSeconds: 5
     timeoutSeconds: 3

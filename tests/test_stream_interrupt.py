@@ -63,9 +63,13 @@ def _build_interrupting_graph():
     return parent.compile(checkpointer=MemorySaver())
 
 
-async def _collect(input_data, config) -> list[dict]:
+async def _collect(
+    input_data,
+    config,
+    mcp_session_id=main._UNBOUND_STREAM_SESSION,
+) -> list[dict]:
     events: list[dict] = []
-    async for sse in main._stream_graph(input_data, config):
+    async for sse in main._stream_graph(input_data, config, mcp_session_id):
         assert sse.startswith("data: ") and sse.endswith("\n\n")
         events.append(json.loads(sse[len("data: ") :].strip()))
     return events
@@ -210,7 +214,7 @@ async def test_full_graph_resume_approved_invokes_confirm_and_streams_message(
         mcp_session_id="fresh-session",
         library_connected=True,
     )
-    resumed = await _collect(main.build_resume_command(req), config)
+    resumed = await _collect(main.build_resume_command(req), config, "fresh-session")
 
     assert confirm_calls == [{"mcp_session_id": "fresh-session", "action_id": 314}]
     assert any(
@@ -237,7 +241,7 @@ async def test_full_graph_resume_denied_streams_cancel_without_confirm(
         mcp_session_id="fresh-session",
         library_connected=True,
     )
-    resumed = await _collect(main.build_resume_command(req), config)
+    resumed = await _collect(main.build_resume_command(req), config, "fresh-session")
 
     assert confirm_calls == []
     assert any(e["type"] == "text" and "예약이 취소되었습니다." in e["content"] for e in resumed)
