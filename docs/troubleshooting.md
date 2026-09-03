@@ -61,3 +61,52 @@ health가 `VALID`로 회복되고, 계속 실패할 때 고정 안내와 프론�
 실계정으로 확인해야 한다. companion ssuMCP 변경은 LMS 목록·대시보드·내보내기 오류를 top-level
 non-OK 계약으로 이전한다. 정확한 legacy 접두어 guard는 backend-first rolling deployment 동안만
 구버전 응답을 보완하며, 두 서비스가 모두 배포된 뒤 제거할 수 있다.
+
+## 2026-09-03 — MCP deep health 503과 진단 로그 경계
+
+### 기대와 영향
+
+최종 공개 점검에서 `/health`는 HTTP 200이었지만 `/healthz/deep`은 세 번 모두 HTTP 503과
+`status=DEGRADED`, `mcp=DOWN`을 반환했다. deep health는 2초 안에 ssuMCP client의 `get_tools()`를
+수행하므로, 프로세스는 살아 있어도 MCP 도구가 필요한 요청이 영향을 받을 수 있는 상태다. 실제 사용자
+실패율은 확인 가능한 trace가 없어 추정하지 않았다.
+
+### 증거와 원인 경계
+
+- ssuMCP의 공개 식단 REST 경로는 같은 시각 HTTP 200이었다. 이는 backend와 해당 REST 경로의 도달성만
+  증명하며 MCP initialize와 `tools/list` 성공을 증명하지 않는다.
+- liveness는 `/health`, readiness는 `/ready`에 연결되어 있어 deep health 503이 Pod 재시작이나 traffic
+  제외를 직접 만들지는 않는다.
+- 당시 public deep-health 응답과 기존 `deep health MCP check failed: %s` 로그만으로는 DNS, TLS, ingress,
+  HTTP status, MCP protocol, tools/list와 전체 timeout을 구분할 수 없다. 기존 로그는 exception message
+  원문을 남겨 URL이나 session 값이 포함될 위험도 있었다.
+- 최근 공개 문서 정리는 deep-health 코드와 설정을 바꾸지 않아 직접 회귀라는 근거가 없다. Argo CD와
+  cluster log에 접근하지 못해 실제 실행 image와 최초 실패 계층은 확정하지 않았다.
+
+### 변경과 대안
+
+deep health의 외부 503 계약과 2초 제한은 유지한다. 내부 경고만 exception tree를 순회해 최대 네 개의
+exception class와 `HTTPStatusError`의 숫자 status를 낮은 카디널리티 필드로 기록하도록 바꿨다. exception
+message, request URL, response body, credential, token과 session identifier는 기록하지 않는다.
+
+외부 응답에 원인을 추가하는 방식은 진단 정보를 공격자에게 노출하므로 제외했다. 모든 exception message를
+정규식으로 지우는 방식도 새 credential 형식을 놓칠 수 있어 제외했다. deep health를 liveness에 연결하거나
+근거 없이 timeout을 늘리는 방식은 downstream 장애를 재시작으로 증폭하거나 증상을 숨길 수 있어 채택하지
+않았다.
+
+### 검증과 다음 진단
+
+- nested `ExceptionGroup` 안의 HTTP 429와 timeout type을 message 없이 고정된 필드로 만드는 단위 테스트
+- 실제 deep-health handler가 외부 503 body를 유지하고 secret-bearing URL과 exception message를 로그에
+  남기지 않는 endpoint 테스트
+- Ruff check, format check와 전체 pytest를 통과한 뒤에만 image를 발행
+
+다음 재현에서는 같은 시각의 새 type/status 로그와 Pod 내부
+`initialize → notifications/initialized → tools/list` 단일 session probe를 대조한다. affinity cookie,
+`Mcp-Session-Id`와 protocol header를 요청 사이에 유지하고, 성공한 session은 DELETE한다. Argo source
+revision, 실제 Pod image, Ready 수와 restart 횟수도 desired state와 비교한다. 이 증거 전에는 DNS, TLS,
+ingress, rate-limit 또는 protocol 중 하나를 root cause로 확정하거나 production 설정을 바꾸지 않는다.
+
+후속 검토 질문은 deep health를 liveness와 분리한 이유, message-free log로 충분한 분기 정보를 얻는지,
+rate window와 concurrency lease 거부를 metric으로 구분할 필요가 있는지다. cluster evidence가 확보될 때까지
+실제 MCP 가용성 위험은 남는다.

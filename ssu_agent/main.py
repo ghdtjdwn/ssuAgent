@@ -91,7 +91,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ssu_agent import config
 from ssu_agent.agents.auth_guard import contains_internal_auth_guidance
-from ssu_agent.mcp_client import create_mcp_client
+from ssu_agent.mcp_client import create_mcp_client, mcp_failure_log_fields
 from ssu_agent.supervisor.graph import build_supervisor_graph
 from ssu_agent.supervisor.state import bind_request_mcp_session_id
 
@@ -1321,7 +1321,12 @@ async def deep_health():
             timeout=_DEEP_HEALTH_MCP_TIMEOUT_SECONDS,
         )
     except Exception as exc:
-        logger.warning("deep health MCP check failed: %s", exc)
+        exception_types, http_statuses = mcp_failure_log_fields(exc)
+        logger.warning(
+            "deep health MCP check failed: types=%s http_statuses=%s",
+            exception_types,
+            http_statuses,
+        )
         return JSONResponse(
             status_code=503,
             content={"status": "DEGRADED", "mcp": "DOWN"},

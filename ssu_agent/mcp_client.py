@@ -110,6 +110,24 @@ def _walk_exception_tree(exc: BaseException) -> Iterable[BaseException]:
             stack.append(current.__context__)
 
 
+def mcp_failure_log_fields(exc: BaseException) -> tuple[str, str]:
+    """Return bounded message-free diagnostics for MCP transport logs."""
+    exception_types: set[str] = set()
+    http_statuses: set[int] = set()
+
+    for current in _walk_exception_tree(exc):
+        if not isinstance(current, BaseExceptionGroup):
+            exception_types.add(type(current).__name__)
+        if isinstance(current, httpx.HTTPStatusError):
+            status = current.response.status_code
+            if 100 <= status <= 599:
+                http_statuses.add(status)
+
+    type_field = ",".join(sorted(exception_types)[:4]) or type(exc).__name__
+    status_field = ",".join(str(status) for status in sorted(http_statuses)[:4]) or "none"
+    return type_field, status_field
+
+
 class _RetryingMCPTool(BaseTool):
     _wrapped: BaseTool = PrivateAttr()
     _retry_backoff_seconds: float = PrivateAttr()

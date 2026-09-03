@@ -4,7 +4,7 @@ import httpx
 import pytest
 from langchain_core.tools import StructuredTool, tool
 
-from ssu_agent.mcp_client import wrap_mcp_tool_for_retry
+from ssu_agent.mcp_client import mcp_failure_log_fields, wrap_mcp_tool_for_retry
 from ssu_agent.supervisor.graph import categorise_tools
 
 
@@ -102,3 +102,22 @@ def test_retry_wrapper_preserves_tool_identity_for_categorisation():
 
     cats = categorise_tools([wrapped])
     assert cats["library"] == [wrapped]
+
+
+def test_failure_log_fields_flatten_groups_without_messages():
+    secret = "private-session-reference"
+    request = httpx.Request("POST", f"https://ssumcp.example/mcp?session={secret}")
+    response = httpx.Response(429, request=request, text=secret)
+    http_error = httpx.HTTPStatusError(
+        f"rate limited for {secret}",
+        request=request,
+        response=response,
+    )
+    failure = ExceptionGroup(f"outer {secret}", [http_error, TimeoutError(secret)])
+
+    exception_types, http_statuses = mcp_failure_log_fields(failure)
+
+    assert exception_types == "HTTPStatusError,TimeoutError"
+    assert http_statuses == "429"
+    assert secret not in exception_types
+    assert secret not in http_statuses

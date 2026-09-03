@@ -8,6 +8,7 @@ lifespan (which opens a real Postgres pool) does not run.
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
@@ -235,6 +236,48 @@ def test_deep_health_reports_mcp_down(monkeypatch: pytest.MonkeyPatch, client: T
 
     assert resp.status_code == 503
     assert resp.json() == {"status": "DEGRADED", "mcp": "DOWN"}
+
+
+def test_deep_health_log_excludes_transport_exception_message(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+):
+    secret = "private-session-reference"
+    request = httpx.Request("POST", f"https://ssumcp.example/mcp?session={secret}")
+    response = httpx.Response(429, request=request, text=secret)
+
+    class FailingMCPClient:
+        async def get_tools(self):
+            raise ExceptionGroup(
+                f"outer {secret}",
+                [
+                    httpx.HTTPStatusError(
+                        f"rate limited for {secret}",
+                        request=request,
+                        response=response,
+                    )
+                ],
+            )
+
+    emitted: list[str] = []
+
+    def capture_warning(message: str, *args, **kwargs) -> None:
+        assert not kwargs.get("exc_info")
+        emitted.append(message % args)
+
+    monkeypatch.setattr(
+        main,
+        "create_mcp_client",
+        lambda *, timeout_seconds=None: FailingMCPClient(),
+    )
+    monkeypatch.setattr(main.logger, "warning", capture_warning)
+
+    resp = client.get("/healthz/deep")
+
+    assert resp.status_code == 503
+    assert resp.json() == {"status": "DEGRADED", "mcp": "DOWN"}
+    assert emitted == ["deep health MCP check failed: types=HTTPStatusError http_statuses=429"]
+    assert secret not in emitted[0]
 
 
 def test_readiness_checks_pool_and_checkpointer_with_bounded_probe(
