@@ -110,3 +110,16 @@ ingress, rate-limit 또는 protocol 중 하나를 root cause로 확정하거나 
 후속 검토 질문은 deep health를 liveness와 분리한 이유, message-free log로 충분한 분기 정보를 얻는지,
 rate window와 concurrency lease 거부를 metric으로 구분할 필요가 있는지다. cluster evidence가 확보될 때까지
 실제 MCP 가용성 위험은 남는다.
+
+### 전달 결과
+
+[PR #86](https://github.com/ghdtjdwn/ssuAgent/pull/86)의 정확한 head
+`8539b739364b6806bf55ca3afca4a6e723cd71b4`를 `main`에 fast-forward했다. PR의 Quality, Helm,
+ARM64 image 검증, CodeQL과 Gitleaks가 모두 통과했고, [main CI](https://github.com/ghdtjdwn/ssuAgent/actions/runs/33706182247)는
+동일 SHA의 ARM64 image를 GHCR에 발행했다. Image Updater commit
+`ab11ebdc2de3ef6665e33dfd770f8ac6dc660cf6`은 desired tag를 `sha-8539b739364b6806bf55ca3afca4a6e723cd71b4`로
+갱신했으며 해당 commit의 Security와 CodeQL도 통과했다.
+
+갱신 뒤 공개 `/health`는 HTTP 200이었지만 `/healthz/deep`은 여전히 HTTP 503이었다. 접근 가능한 환경에서
+Argo CD와 실제 Pod image를 확인하지 못했으므로 새 image의 rollout 완료나 새 진단 필드가 production log에
+도달했다고 주장하지 않는다. production 설정과 수동 restart는 수행하지 않았다.
