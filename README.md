@@ -10,7 +10,7 @@ ssuAI의 자연어 요청을 도메인별 MCP 도구로 라우팅하고, 대화 
 관리하는 FastAPI/LangGraph 오케스트레이션 서비스다.
 
 [라이브 챗봇](https://ssuai.vercel.app/chat) ·
-[플랫폼 사례 연구](https://seongju.vercel.app/projects/ssu-platform/) · [문서 지도](docs/README.md)
+[문서 지도](docs/README.md)
 
 ## 플랫폼에서 맡는 역할
 

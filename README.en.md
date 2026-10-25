@@ -10,7 +10,7 @@ A FastAPI/LangGraph orchestration service that routes ssuAI requests to domain-s
 and manages conversation state, SSE streams, and user-approval flows.
 
 [Live chat](https://ssuai.vercel.app/chat) ·
-[Platform case study](https://seongju.vercel.app/en/projects/ssu-platform/) · [Documentation map](docs/README.md)
+[Documentation map](docs/README.md)
 
 ## Role in the platform
 
