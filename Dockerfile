@@ -9,7 +9,7 @@ COPY ssu_agent ./ssu_agent
 RUN uv sync --no-dev --frozen
 
 # Stage 2: minimal runtime image
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS runtime
+FROM python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913 AS runtime
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/ssu_agent /app/ssu_agent
