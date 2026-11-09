@@ -12,14 +12,19 @@ RUN uv sync --no-dev --frozen
 
 # Stage 2: minimal runtime image
 FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS runtime
+# CI passes the main commit that produced this image; GET /health reports it as
+# build_sha so a running container can be matched to its GHCR sha-<commit> tag.
+ARG GIT_SHA=unknown
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/ssu_agent /app/ssu_agent
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-# Same UID as the Helm chart's containerSecurityContext.runAsUser, so local
-# docker runs and the cluster agree. The venv is read-only at runtime.
+    PYTHONUNBUFFERED=1 \
+    SSUAGENT_BUILD_SHA=${GIT_SHA}
+# Fixed non-root UID 1001; the production Compose service runs the container
+# with the same uid, so local docker runs and production agree. The venv is
+# read-only at runtime.
 RUN useradd --uid 1001 --no-create-home --shell /usr/sbin/nologin agent
 USER 1001
 EXPOSE 8000

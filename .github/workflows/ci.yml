@@ -86,6 +86,8 @@ jobs:
           push: false
           load: true
           tags: ssuagent:pr
+          build-args: |
+            GIT_SHA=${{ github.event.pull_request.head.sha }}
           cache-from: type=gha
       # A build alone passed with a runtime base image whose Python minor did not
       # match the builder venv (Dependabot #117). Importing the app inside the
@@ -94,6 +96,7 @@ jobs:
         run: |
           docker run --rm --platform linux/arm64 ssuagent:pr id -u
           docker run --rm --platform linux/arm64 ssuagent:pr python -c "import ssu_agent.main; print('import ok')"
+          test "$(docker run --rm --platform linux/arm64 ssuagent:pr python -c 'from ssu_agent import config; print(config.BUILD_SHA)')" = "${{ github.event.pull_request.head.sha }}"
 
   docker:
     name: Agent image (GHCR, ARM64)
@@ -124,5 +127,7 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: ghcr.io/ghdtjdwn/ssuagent:sha-${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -62,7 +62,9 @@ registry나 GitHub 자격증명을 두지 않고 공개 package와 공개 저장
 - production은 `AGENT_API_KEY_REQUIRED=true`와 실제 frontend origin allow-list를 사용한다. 공개 주소에서
   key 없는 `/agent/stream`은 401, allow-list 밖 origin의 preflight는 400이다.
 - liveness는 shallow `/health`, readiness는 PostgreSQL pool과 checkpointer table을 bounded query로 확인하는
-  `/ready`, upstream MCP 진단은 `/healthz/deep`을 사용한다. 자동 반영의 성공 판정은 `/ready`다.
+  `/ready`, upstream MCP 진단은 `/healthz/deep`을 사용한다. 자동 반영의 성공 판정은 `/ready`다. `/health`는
+  image를 만든 commit을 `build_sha`로 돌려주므로(CI build-arg `GIT_SHA`, 없으면 `unknown`) 호스트에 접근하지
+  않아도 어떤 commit이 실행 중인지 공개 주소에서 확인할 수 있다.
 
 Secret key 이름과 선택 provider는 [configuration.md](configuration.md)와 이전 경로의
 [`secret.example.yaml`](../deploy/charts/ssu-agent/templates/secret.example.yaml)을 참고한다. 실제 값을
@@ -77,7 +79,8 @@ Secret key 이름과 선택 provider는 [configuration.md](configuration.md)와 
 3. 호스트 배포 이력 로그에 해당 SHA와 digest로 `success`가 기록됐는지 확인
 4. `docker compose ps`로 container가 `healthy`인지, `docker inspect`로 running image가 기대한 `tag@digest`인지
    확인
-5. `/health`가 `UP`, `/ready`가 `postgres=UP`, `checkpointer=UP`, `/healthz/deep`이 `mcp=UP`인지 확인
+5. `/health`가 `UP`이고 `build_sha`가 반영한 commit SHA와 같은지, `/ready`가 `postgres=UP`, `checkpointer=UP`,
+   `/healthz/deep`이 `mcp=UP`인지 확인
 6. direct no-key `/agent/stream`이 401이고, ssuAI server proxy 경로가 계약에 맞는 상태 코드를
    반환하는지 확인
 7. container log의 `legacy checkpoint capability scrubbed N row(s)`를 확인하고 재기동 후 같은 log가

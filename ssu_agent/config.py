@@ -15,6 +15,12 @@ DATABASE_URL: str = os.getenv(
     "postgresql://ssuai:dev@localhost:5432/ssuai",
 ).strip()
 
+# Commit the running image was built from. The Dockerfile sets it from the CI
+# build-arg GIT_SHA; local runs and images built without the arg report
+# "unknown". Exposed read-only on GET /health so a deploy can be verified
+# against the GHCR sha-<commit> tag without host access.
+BUILD_SHA: str = os.getenv("SSUAGENT_BUILD_SHA", "unknown").strip() or "unknown"
+
 # CORS allow-list. Comma-separated origins; a lone "*" means allow all.
 # Default "*" preserves the previous wide-open behavior until configured.
 ALLOWED_ORIGINS: list[str] = [
