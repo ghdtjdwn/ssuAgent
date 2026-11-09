@@ -5,7 +5,11 @@
 | 날짜 | 2026-07-11 |
 | 상태 | Accepted |
 | 범위 | `ssu_agent/config.py`, `ssu_agent/llm_factory.py`, `tests/test_llm_factory.py` |
-| 관련 | [ADR 004](004-multi-provider-llm-fallback.md) |
+| 관련 | [ADR 0004](0004-multi-provider-llm-fallback.md) |
+
+> 상태 갱신 (2026-11-09): 제목의 "임시 dev 테스트"는 도입 당시 맥락이다. provider는 여전히 선택
+> 사항이며 `ANTHROPIC_API_KEY` 유무로만 켜지고, 현재 순서와 역할은 [README](../../README.md)의
+> 아키텍처 절과 `ssu_agent/llm_factory.py`를 기준으로 한다. 아래 본문은 결정 당시 그대로 둔다.
 
 ## 배경
 

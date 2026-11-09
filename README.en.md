@@ -54,6 +54,28 @@ browser
 See the [architecture document](docs/architecture.md) for request, trust, and state boundaries and
 the current single-replica constraint.
 
+## What flows through the stream
+
+`/agent/stream` is SSE: a sequence of `data: {json}` lines. A request that needs approval, such as a
+library seat reservation, pauses the stream at `interrupt`; ssuAI sends the user's decision to
+`/agent/resume` and the conversation continues on the same `thread_id`. The event names and order
+below are the contract fixed by the [stream contract tests](tests/test_stream_interrupt.py).
+
+```text
+POST /agent/stream   {"message": "B-007 예약해줘", "thread_id": "…", "library_connected": true}
+  data: {"type": "handoff",   "agent": "library", …}
+  data: {"type": "interrupt", "data": {"action_id": 314, …}}
+  (stream ends without done — waiting for the user's decision)
+
+POST /agent/resume   {"thread_id": "…", "approved": true, "action_id": 314}
+  data: {"type": "text",      "content": "…"}
+  data: {"type": "done"}
+```
+
+- The resume stream emits no fresh `handoff` and no second `interrupt`; it ends with `done`.
+- Denial (`approved: false`) never calls `confirm_action`; it streams a cancellation `text` and `done`.
+- If graph execution fails, a fixed `error` event is sent instead of the exception text.
+
 ## Engineering evidence
 
 | Problem | Implementation and verification |
@@ -62,9 +84,9 @@ the current single-replica constraint.
 | Long-lived checkpoints retaining capabilities or personal data | Request-scoped capabilities, ownership-checked deletion, and bounded 30-day retention — [ADR 0023](docs/adr/0023-conversation-lifecycle-and-edge-identity.md) |
 | Broken resume semantics after stream reconnect or interrupt | Stable thread and explicit `resume` event ordering — [stream contract tests](tests/test_stream_interrupt.py) |
 | A clear LMS export timing out in another LLM turn | Conservative direct routing and deterministic link generation — [ADR 0022](docs/adr/0022-deterministic-lms-export-download.md) · [LMS tests](tests/test_lms_agent.py) |
-| Provider-specific tool-call formats and cascading failures | Configuration-driven provider sequence and agent-local fallback — [factory tests](tests/test_llm_factory.py) · [ADR 0004](docs/adr/004-multi-provider-llm-fallback.md) |
+| Provider-specific tool-call formats and cascading failures | Configuration-driven provider sequence and agent-local fallback — [factory tests](tests/test_llm_factory.py) · [ADR 0004](docs/adr/0004-multi-provider-llm-fallback.md) |
 | Handoffs duplicating answers or choosing the wrong tool | Routing and safety evaluation sets — [routing eval](tests/test_eval_routing.py) · [safety eval](tests/test_eval_safety.py) |
-| Deployment of an unverified image | ARM64 image publication follows Ruff, formatting, and pytest — [CI workflow](.github/workflows/ci.yml) · [deployment guide](docs/deploy.md) |
+| Deployment of an unverified image | ARM64 image publication follows Ruff, formatting, and pytest; pull requests also run `import ssu_agent.main` inside the built image — [CI workflow](.github/workflows/ci.yml) · [deployment guide](docs/deploy.md) |
 | Static security regressions and stale dependencies | CodeQL v4 Python analysis plus uv and GitHub Actions Dependabot — [CodeQL](.github/workflows/codeql.yml) · [Dependabot](.github/dependabot.yml) |
 
 The main stack is Python 3.12, FastAPI, LangGraph, LangChain, PostgreSQL checkpointer, MCP
@@ -107,10 +129,13 @@ evidence boundary.
 - [Architecture and trust boundaries](docs/architecture.md) (Korean)
 - [Configuration and environment variables](docs/configuration.md) (Korean)
 - [GitOps deployment and operational verification](docs/deploy.md) (Korean)
-- [Architecture decision records](docs/adr/) (Korean)
+- [Operational incident records](docs/troubleshooting.md) (Korean)
+- [ADR index](docs/adr/README.md) (Korean)
 
 ## Scope and limitations
 
+- This is an unofficial project operated alongside the ssuAI suite; university data is handled only
+  through ssuMCP.
 - Production currently runs one replica and inbound rate limiting is process-local. Signed client
   identities provide correct per-user buckets within that process; scale-out still needs a shared store.
 - CI stream/HITL unit tests use `MemorySaver`; the current gate does not include a container-backed
