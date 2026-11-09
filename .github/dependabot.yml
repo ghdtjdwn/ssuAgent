@@ -42,6 +42,11 @@ updates:
     commit-message:
       prefix: chore(deps)
       include: scope
+    ignore:
+      # The runtime image must stay on the same Python minor as the uv builder
+      # image, so Python major/minor moves are made by hand in both stages.
+      - dependency-name: python
+        update-types: ['version-update:semver-major', 'version-update:semver-minor']
 
 # Major versions remain separate PRs for compatibility review. Security updates
 # are filed outside the weekly version-update schedule.

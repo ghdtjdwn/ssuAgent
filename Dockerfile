@@ -1,3 +1,5 @@
+# Both stages must use the same Python minor version: the builder writes the
+# venv under .venv/lib/python3.12 and the runtime interpreter has to find it.
 # Stage 1: install dependencies with uv
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS builder
 WORKDIR /app
@@ -16,5 +18,9 @@ COPY --from=builder /app/ssu_agent /app/ssu_agent
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+# Same UID as the Helm chart's containerSecurityContext.runAsUser, so local
+# docker runs and the cluster agree. The venv is read-only at runtime.
+RUN useradd --uid 1001 --no-create-home --shell /usr/sbin/nologin agent
+USER 1001
 EXPOSE 8000
 CMD ["uvicorn", "ssu_agent.main:app", "--host", "0.0.0.0", "--port", "8000"]
