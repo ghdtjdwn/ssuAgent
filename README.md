@@ -88,7 +88,7 @@ POST /agent/resume   {"thread_id": "…", "approved": true, "action_id": 314}
 | 정적 보안 회귀와 stale dependency | CodeQL v4 Python 분석, uv·GitHub Actions Dependabot — [CodeQL](.github/workflows/codeql.yml) · [Dependabot](.github/dependabot.yml) |
 
 주요 스택은 Python 3.12, FastAPI, LangGraph, LangChain, PostgreSQL checkpointer, MCP Streamable
-HTTP, SSE, uv, Ruff, pytest, Docker, Helm과 ArgoCD다.
+HTTP, SSE, uv, Ruff, pytest, Docker와 Docker Compose다.
 
 ## 로컬 실행과 검증
 

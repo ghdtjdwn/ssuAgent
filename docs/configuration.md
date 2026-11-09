@@ -1,7 +1,7 @@
 # ssuAgent 설정
 
 로컬 예시는 [`.env.example`](../.env.example)에 있다. 실제 API key, database password, agent shared
-key는 `.env`, Kubernetes Secret 또는 배포 플랫폼의 secret store에만 두고 저장소에 커밋하지 않는다.
+key는 `.env`나 배포 호스트의 env file에만 두고 저장소에 커밋하지 않는다.
 
 ## 필수 설정
 
@@ -76,4 +76,5 @@ uv sync --extra dev
 uv run uvicorn ssu_agent.main:app --host 0.0.0.0 --port 8000
 ```
 
-Kubernetes production 설정은 [배포 문서](deploy.md)와 Helm `values.yaml`을 기준으로 한다.
+production 설정은 [배포 문서](deploy.md)를 기준으로 한다. 환경 변수 이름은 이전 k3s 경로의 Helm
+`values.yaml`과 `secret.example.yaml`에서도 같은 이름으로 확인할 수 있다.
