@@ -124,6 +124,24 @@ executing the real routing tools, markers, parser, and graph destinations after 
 is not a live-model tool-selection accuracy result. See [`evals/README.md`](evals/README.md) for the
 evidence boundary.
 
+## Deployment and operations
+
+Production is a Docker Compose service on a single ARM64 VM. It moved off k3s + ArgoCD on 2026-10-15;
+the reasons and trade-offs are in [ADR 0024](docs/adr/0024-single-vm-compose-timer-deploy.md) (Korean).
+
+```text
+main merge → CI (Ruff, pytest) → ARM64 image → ghcr.io/ghdtjdwn/ssuagent:sha-<commit>
+  → host timer (every 15 min) detects the new sha tag → digest-pinned pull → compose up -d --wait
+  → public /ready returns 200 → on failure, revert to the previous image
+```
+
+- The host holds no GitHub or registry credentials and pulls public images only. The Compose
+  definition and env live in a private infrastructure repository.
+- `GET /health` → `{"status":"UP","version":"0.2.0","build_sha":"<commit>"}`: process liveness plus the
+  running commit. `GET /ready`: bounded PostgreSQL pool and checkpointer probe (the success criterion of
+  the automatic rollout). `GET /healthz/deep`: upstream MCP diagnostics.
+- The [deployment guide](docs/deploy.md) (Korean) lists what to check when a deploy did not land.
+
 ## Documentation
 
 - [Documentation map](docs/README.md)

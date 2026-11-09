@@ -1,7 +1,7 @@
 # ssuAgent 문서 지도
 
-이 저장소의 현재 코드, 테스트, CI와 배포 manifest가 최종 기준이다. 문서와 충돌하면 해당 구현을
-먼저 확인하고 문서를 함께 수정한다.
+이 저장소의 현재 코드, 테스트와 CI가 최종 기준이다. 문서와 충돌하면 해당 구현을 먼저 확인하고
+문서를 함께 수정한다. production 실행 정의(Compose, env, 자동 반영)는 비공개 인프라 저장소에서 관리한다.
 
 ## 시작하기
 
@@ -11,7 +11,7 @@
 
 ## 설계 결정
 
-- [ADR 색인](adr/README.md) — 19개 ADR의 번호·날짜·상태·한 줄 요약
+- [ADR 색인](adr/README.md) — 20개 ADR의 번호·날짜·상태·한 줄 요약
 - [Supervisor architecture](adr/0001-supervisor-architecture.md)
 - [PostgreSQL checkpointer](adr/0003-postgres-checkpointer.md)
 - [Agent edge hardening](adr/0009-agent-edge-hardening.md)
@@ -20,13 +20,14 @@
 - [Optional Anthropic provider](adr/0015-optional-anthropic-provider.md)
 - [Deterministic LMS export](adr/0022-deterministic-lms-export-download.md)
 - [Conversation lifecycle and signed edge identity](adr/0023-conversation-lifecycle-and-edge-identity.md)
+- [Single-VM Docker Compose and timer-based image pull](adr/0024-single-vm-compose-timer-deploy.md)
 
 ## 운영
 
 - [배포와 운영 검증](deploy.md)
 - [운영 장애 기록](troubleshooting.md)
 - [GitHub Actions CI](../.github/workflows/ci.yml)
-- [Helm chart](../deploy/charts/ssu-agent/)와 [ArgoCD Application](../deploy/argocd/application-ssu-agent.yaml) — 2026-10-15까지 쓴 k3s 경로의 manifest
+- [k3s 경로 manifest 보관](../deploy/archive/k3s/) — 2026-06-14 ~ 2026-10-15의 Helm chart와 ArgoCD Application, 참고용
 
 ## 검증 책임
 

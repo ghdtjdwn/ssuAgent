@@ -3,10 +3,11 @@
 이 문서는 현재 production 배포 경로와 검증 기준을 설명한다. 요청·신뢰·상태 경계는
 [architecture.md](architecture.md), 환경 변수는 [configuration.md](configuration.md)가 기준이다.
 
-production은 2026-10-15에 k3s + ArgoCD에서 단일 ARM64 호스트의 Docker Compose로 옮겨졌다. 이 저장소의
-`deploy/charts/ssu-agent/`와 `deploy/argocd/application-ssu-agent.yaml`은 이전 경로의 manifest이며 더 이상
-production의 desired state가 아니다. 이전 경로와 그 운영 기록은
-[이전 경로: k3s와 ArgoCD](#이전-경로-k3s와-argocd-2026-07--2026-10)에 남긴다.
+production은 2026-10-15에 k3s + ArgoCD에서 단일 ARM64 VM(1 vCPU, 약 6GB RAM)의 Docker Compose로 옮겨졌다.
+전환 이유와 trade-off는 [ADR 0024](adr/0024-single-vm-compose-timer-deploy.md)에 있다. 이전 경로의 Helm
+chart와 ArgoCD Application은 [`deploy/archive/k3s/`](../deploy/archive/k3s/)에 참고용으로만 남겼고 CI가
+검증하지 않는다. 이전 경로의 운영 기록은 [이전 경로: k3s와 ArgoCD](#이전-경로-k3s와-argocd-2026-06--2026-10)에
+남긴다.
 
 ## 배포 계약
 
@@ -45,7 +46,7 @@ registry나 GitHub 자격증명을 두지 않고 공개 package와 공개 저장
 | container 실행 조건 | Compose service 정의(이 저장소 밖). image와 같은 uid 1001로 실행한다 |
 | Secret 값 | production 호스트의 env file(이 저장소 밖). 값은 Git에 두지 않는다 |
 | 실제 배포 결과 | 배포 이력 로그, running container image digest, health endpoints |
-| 이전 k3s 경로 manifest | `deploy/charts/ssu-agent/`, `deploy/argocd/application-ssu-agent.yaml` |
+| 이전 k3s 경로 manifest(보관용) | `deploy/archive/k3s/` |
 
 ## Runtime 경계
 
@@ -66,9 +67,8 @@ registry나 GitHub 자격증명을 두지 않고 공개 package와 공개 저장
   image를 만든 commit을 `build_sha`로 돌려주므로(CI build-arg `GIT_SHA`, 없으면 `unknown`) 호스트에 접근하지
   않아도 어떤 commit이 실행 중인지 공개 주소에서 확인할 수 있다.
 
-Secret key 이름과 선택 provider는 [configuration.md](configuration.md)와 이전 경로의
-[`secret.example.yaml`](../deploy/charts/ssu-agent/templates/secret.example.yaml)을 참고한다. 실제 값을
-명령 기록, CI log, issue나 문서에 붙여 넣지 않는다.
+Secret key 이름과 선택 provider는 [configuration.md](configuration.md)를 참고한다. 실제 값을 명령 기록,
+CI log, issue나 문서에 붙여 넣지 않는다.
 
 ## Release 검증
 
@@ -96,6 +96,26 @@ rollback한 이전 image도 additive trigger가 exact legacy capability channel�
 
 문서-only 변경은 CI의 `paths-ignore` 대상이므로 새 image가 생기지 않는다. 자동 반영은 tag가 없는 commit을
 건너뛰고 가장 최근에 image가 있는 commit을 유지하므로 교체도 일어나지 않는 것이 정상이다.
+
+### 배포가 반영되지 않았을 때
+
+merge 뒤 약 20분이 지나도 `/health`의 `build_sha`가 바뀌지 않으면 다음 순서로 어디서 멈췄는지 찾는다.
+
+1. **image가 있는가.** 해당 commit의 main CI에서 `Agent image (GHCR, ARM64)` job이 성공했고
+   `ghcr.io/ghdtjdwn/ssuagent:sha-<commit>` tag가 package 페이지에 보이는지 확인한다. 문서-only commit은
+   image가 없는 것이 정상이다.
+2. **timer가 돌았는가.** 호스트에서 자동 반영 timer unit의 다음·마지막 실행 시각과 service unit의 마지막
+   종료 상태를 본다. 비활성화 스위치 파일이 남아 있으면 스크립트는 아무것도 하지 않는다.
+3. **배포 이력 로그.** 호스트의 배포 이력 로그(JSON Lines, 한 줄에 time·service·result·from·to·note)의
+   마지막 `ssu-agent` 항목을 본다. `success`면 교체가 끝난 것이고, `rolled_back`이면 새 image가 `/ready`
+   확인에 실패해 이전 image로 돌아간 것이다. `pull_failed`는 registry pull 실패, `failed`는 rollback 뒤에도
+   확인에 실패한 상태라 수동 조치가 필요하다. `rolled_back`으로 기록된 digest는 새 commit이 나올 때까지
+   다시 시도하지 않는다.
+4. **container.** `docker compose ps`의 health와 `docker inspect`의 image digest, container log의 startup
+   오류(예: capability scrub 상한 초과, env 누락으로 인한 startup 거부)를 확인한다.
+
+호스트의 Compose 정의, env file, 자동 반영 스크립트와 timer unit은 비공개 인프라 저장소에서 관리하며 이
+저장소에는 없다.
 
 ### 2026-11-09 v0.2.0 반영 증거
 
@@ -130,13 +150,13 @@ main CI [42599074409](https://github.com/ghdtjdwn/ssuAgent/actions/runs/42599074
   MCP 진단이며 반영 성공 판정에는 포함하지 않아 upstream 장애가 agent 재시작이나 rollback으로 번지지 않는다.
 - 배포 스크립트, Compose 정의, Secret, Vercel proxy wiring은 repository CI가 검증하지 못한다.
 
-## 이전 경로: k3s와 ArgoCD (2026-07 ~ 2026-10)
+## 이전 경로: k3s와 ArgoCD (2026-06 ~ 2026-10)
 
-2026-10-15 이전 production은 ARM64 k3s의 `ssuai-prod` namespace였다. ArgoCD Image Updater가 새 SHA tag를
-감지해 `deploy/charts/ssu-agent/values.yaml`의 `image.tag`를 Git에 write-back하고, ArgoCD가 Helm chart를
-auto-sync했다. 마지막 write-back은 2026-10-08 commit `ea49362`(`sha-1b9b4e29…`)이며 이 tag는 cluster에서
-Pending으로 남아 실행된 적이 없다. 이관 뒤 `values.yaml`의 `image.tag`는 갱신하지 않으며, chart는 CI의
-Helm lint와 Pod token mount 검증을 계속 통과하는 참고 manifest로 남긴다.
+2026-06-14부터 2026-10-15까지 production은 ARM64 k3s의 `ssuai-prod` namespace였다. ArgoCD Image Updater가 새
+SHA tag를 감지해 Helm chart `values.yaml`의 `image.tag`를 Git에 write-back하고, ArgoCD가 chart를 auto-sync했다.
+마지막 write-back은 2026-10-08 commit `ea49362`(`sha-1b9b4e29…`)이며 이 tag는 cluster CPU 부족으로 Pending에
+남아 실행된 적이 없다. chart와 Application manifest는 [`deploy/archive/k3s/`](../deploy/archive/k3s/)에 그대로
+옮겼고 갱신하지 않는다. 전환 결정은 [ADR 0024](adr/0024-single-vm-compose-timer-deploy.md)에 있다.
 
 ### 2026-07-18 릴리스 증거
 

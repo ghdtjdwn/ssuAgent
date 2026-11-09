@@ -35,6 +35,6 @@ Library write는 `prepare_*` 단계에서 LangGraph `interrupt()`로 멈춘다. 
 
 ## 배포와 운영 제약
 
-GitHub Actions는 Ruff와 pytest를 통과한 main commit을 ARM64 image로 GHCR에 게시한다. production 호스트의 자동 반영 timer가 15분마다 main의 최신 image를 digest로 고정해 Docker Compose service를 교체하고, 공개 `/ready`로 확인한 뒤 실패하면 이전 image로 되돌린다. 2026-10-15까지 쓰던 k3s + ArgoCD 경로와 함께 [deploy.md](deploy.md)에 정리했다.
+GitHub Actions는 Ruff와 pytest를 통과한 main commit을 ARM64 image로 GHCR에 게시한다. production 호스트의 자동 반영 timer가 15분마다 main의 최신 image를 digest로 고정해 Docker Compose service를 교체하고, 공개 `/ready`로 확인한 뒤 실패하면 이전 image로 되돌린다. 절차는 [deploy.md](deploy.md), 2026-10-15에 k3s + ArgoCD에서 옮긴 이유와 trade-off는 [ADR 0024](adr/0024-single-vm-compose-timer-deploy.md)에 정리했다.
 
 현재 production은 1 replica이고 SlowAPI counter는 process memory에 있다. signed identity로 Vercel egress 공유 문제는 제거했지만 replica를 늘리면 replica마다 quota가 따로 계산된다. 기존 PostgreSQL은 checkpoint용이며 hot-path limiter storage로 검증되지 않았으므로 이번 변경에서 억지로 재사용하지 않았다. scale-out 전 Redis 같은 shared limiter와 failure policy를 별도 검증해야 한다. `/health`는 shallow liveness, `/ready`는 bounded PostgreSQL/checkpointer readiness, `/healthz/deep`은 MCP 진단이다. 대화는 owner 검증 DELETE와 마지막 접근 기준 bounded retention으로 제거하며, DB fence가 DELETE commit 뒤 late checkpoint 재생성을 막는다([ADR 0023](adr/0023-conversation-lifecycle-and-edge-identity.md)).

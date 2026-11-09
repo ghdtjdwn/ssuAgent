@@ -119,6 +119,24 @@ Supervisor 라우팅 계약은 `evals/routing_contract.v1.json`의 버전 고정
 않는다. 따라서 결과는 live-model 도구 선택 정확도가 아니라 결정론적 후속 라우팅 계약의 회귀 근거다.
 경계와 재현 방법은 [`evals/README.md`](evals/README.md)에 기록했다.
 
+## 배포와 운영
+
+production은 단일 ARM64 VM의 Docker Compose service다. 2026-10-15에 k3s + ArgoCD에서 옮겼으며 이유와
+trade-off는 [ADR 0024](docs/adr/0024-single-vm-compose-timer-deploy.md)에 있다.
+
+```text
+main merge → CI (Ruff·pytest) → ARM64 image → ghcr.io/ghdtjdwn/ssuagent:sha-<commit>
+  → 호스트 timer(15분)가 새 sha tag 감지 → digest 고정 pull → compose up -d --wait
+  → 공개 /ready 200 확인 → 실패 시 이전 image로 복귀
+```
+
+- 호스트는 GitHub·registry 자격증명 없이 공개 image만 당긴다. Compose 정의와 env는 비공개 인프라
+  저장소에서 관리한다.
+- `GET /health` → `{"status":"UP","version":"0.2.0","build_sha":"<commit>"}`: process liveness와 실행 중인
+  commit. `GET /ready`: PostgreSQL pool과 checkpointer를 bounded query로 확인(자동 반영의 성공 기준).
+  `GET /healthz/deep`: upstream MCP 진단.
+- 배포가 반영되지 않았을 때의 확인 순서는 [배포 문서](docs/deploy.md)에 있다.
+
 ## 문서
 
 - [문서 지도](docs/README.md)
@@ -132,7 +150,7 @@ Supervisor 라우팅 계약은 `evals/routing_contract.v1.json`의 버전 고정
 
 - ssuAI 스위트와 함께 운영하는 비공식 프로젝트이며, 학교 시스템 데이터는 ssuMCP를 거쳐서만 다룬다.
 - 현재 production은 단일 replica이고 inbound rate limit은 process-local이다. scale-out 전에 shared
-  limiter가 필요하다. 서명된 identity는 현재 pod 안에서 사용자를 정확히 나누지만 replica 간 counter를
+  limiter가 필요하다. 서명된 identity는 현재 process 안에서 사용자를 정확히 나누지만 replica 간 counter를
   공유하지 않는다.
 - CI의 stream/HITL 단위 테스트는 `MemorySaver`를 사용한다. 실제 PostgreSQL을 재시작한 뒤 resume하는
   container integration test는 현재 gate에 포함되지 않는다.
