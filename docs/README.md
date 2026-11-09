@@ -23,16 +23,15 @@
 
 ## 운영
 
-- [GitOps 배포와 검증](deploy.md)
+- [배포와 운영 검증](deploy.md)
 - [운영 장애 기록](troubleshooting.md)
 - [GitHub Actions CI](../.github/workflows/ci.yml)
-- [Helm chart](../deploy/charts/ssu-agent/)
-- [ArgoCD Application](../deploy/argocd/application-ssu-agent.yaml)
+- [Helm chart](../deploy/charts/ssu-agent/)와 [ArgoCD Application](../deploy/argocd/application-ssu-agent.yaml) — 2026-10-15까지 쓴 k3s 경로의 manifest
 
 ## 검증 책임
 
 - Python 코드: Ruff check/format과 pytest가 기준이다.
 - Stream/HITL 계약: `tests/test_stream_interrupt.py`, `tests/test_supervisor.py`가 기준이다.
 - 인증과 thread 소유권: `tests/test_main_security.py`, `tests/test_auth_guard.py`가 기준이다.
-- 운영 배포: GitHub Actions image job, Image Updater write-back, ArgoCD 상태, running image SHA와
-  `/healthz/deep`을 함께 확인한다.
+- 운영 배포: GitHub Actions image job, 호스트 배포 이력, running container image digest와
+  `/ready`·`/healthz/deep`을 함께 확인한다.

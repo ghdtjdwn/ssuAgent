@@ -90,7 +90,7 @@ POST /agent/resume   {"thread_id": "…", "approved": true, "action_id": 314}
 | Static security regressions and stale dependencies | CodeQL v4 Python analysis plus uv and GitHub Actions Dependabot — [CodeQL](.github/workflows/codeql.yml) · [Dependabot](.github/dependabot.yml) |
 
 The main stack is Python 3.12, FastAPI, LangGraph, LangChain, PostgreSQL checkpointer, MCP
-Streamable HTTP, SSE, uv, Ruff, pytest, Docker, Helm, and ArgoCD.
+Streamable HTTP, SSE, uv, Ruff, pytest, Docker, and Docker Compose.
 
 ## Local development and verification
 
