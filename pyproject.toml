@@ -18,7 +18,7 @@ dependencies = [
     # Direct floors for audited security fixes keep transitive users on patched
     # releases without changing their public APIs.
     "cryptography>=50.0.0",
-    "pyasn1>=0.6.4",
+    "pyasn1>=0.6.5",
     "fastapi>=0.115",
     "slowapi>=0.1.9",
     "uvicorn[standard]>=0.51.0",
