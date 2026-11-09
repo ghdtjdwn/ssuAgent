@@ -49,6 +49,10 @@ session 메시지만 재시도한다. tool validation error, adapter의 MCP tool
 
 ## probe 배선 결정
 
+> 상태 갱신 (2026-11-09): 아래의 Helm chart probe는 2026-10-15 k3s 폐기와 함께 사라졌다. 현재 production은
+> Docker Compose 단일 container이며 자동 반영의 성공 판정은 `/ready`, liveness 신호는 `/health`다.
+> liveness를 downstream에 연결하지 않는다는 결론은 그대로 유지한다([ADR 0024](0024-single-vm-compose-timer-deploy.md)).
+
 이번 변경에서는 Helm values와 deployment template을 수정하지 않는다. 현재 chart의
 readiness와 liveness는 모두 shallow `/health`를 가리키며, 그대로 유지한다.
 

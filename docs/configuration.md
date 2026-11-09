@@ -82,5 +82,5 @@ uv sync --extra dev
 uv run uvicorn ssu_agent.main:app --host 0.0.0.0 --port 8000
 ```
 
-production 설정은 [배포 문서](deploy.md)를 기준으로 한다. 환경 변수 이름은 이전 k3s 경로의 Helm
-`values.yaml`과 `secret.example.yaml`에서도 같은 이름으로 확인할 수 있다.
+production 설정은 [배포 문서](deploy.md)를 기준으로 한다. production 값은 호스트의 env file에 있고 그
+정의는 비공개 인프라 저장소에서 관리한다. 이 저장소에는 변수 이름과 계약만 둔다.

@@ -64,6 +64,10 @@ non-OK 계약으로 이전한다. 정확한 legacy 접두어 guard는 backend-fi
 
 ## 2026-09-03 — MCP deep health 503과 진단 로그 경계
 
+> 갱신 (2026-11-09): 이 기록의 Argo CD, Pod, Image Updater는 2026-10-15에 폐기된 k3s 경로다. 같은 증상을
+> 다시 조사할 때의 확인 순서(배포 이력 로그, running container digest, `/health`의 `build_sha`, `/ready`,
+> `/healthz/deep`)는 [deploy.md](deploy.md)를 따른다. 아래 본문은 당시 그대로 둔다.
+
 ### 기대와 영향
 
 최종 공개 점검에서 `/health`는 HTTP 200이었지만 `/healthz/deep`은 세 번 모두 HTTP 503과

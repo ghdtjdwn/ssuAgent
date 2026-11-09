@@ -25,3 +25,4 @@ ssuAgent의 아키텍처 결정 기록이다. 번호는 작성 순서이며 0002
 | [0021](0021-deterministic-public-seat-availability.md) | 공개 좌석 빈자리 조회의 결정적 도구 선택 | 2026-07-16 | Accepted | 층 지정 빈자리 질의를 `fullmatch` 문법으로 분류 |
 | [0022](0022-deterministic-lms-export-download.md) | LMS 전체 자료 내보내기의 결정적 다운로드 응답 | 2026-07-17 | Accepted | 명확한 LMS 요청을 `lms_agent`로 직접 라우팅하고 결정적 링크 생성 |
 | [0023](0023-conversation-lifecycle-and-edge-identity.md) | 대화 capability, 수명 주기와 edge identity hardening | 2026-07-27 | Accepted | request-scoped MCP capability, 소유권 검증 삭제 API, 30일 retention, 서명된 edge identity |
+| [0024](0024-single-vm-compose-timer-deploy.md) | k3s/ArgoCD에서 단일 VM Docker Compose와 timer 기반 image pull로 전환 | 2026-10-15 (문서화 2026-11-09) | Accepted | 무료 한도 안의 1 vCPU/6GB VM 하나에서 Compose로 운영, 15분 timer가 GHCR `sha-<commit>` image를 pull해 교체하고 `/ready` 실패 시 복귀. HPA/PDB·GitOps write-back 없음 |
