@@ -84,7 +84,16 @@ jobs:
           context: .
           platforms: linux/arm64
           push: false
+          load: true
+          tags: ssuagent:pr
           cache-from: type=gha
+      # A build alone passed with a runtime base image whose Python minor did not
+      # match the builder venv (Dependabot #117). Importing the app inside the
+      # built image catches that class of break before merge.
+      - name: Smoke-run the built image
+        run: |
+          docker run --rm --platform linux/arm64 ssuagent:pr id -u
+          docker run --rm --platform linux/arm64 ssuagent:pr python -c "import ssu_agent.main; print('import ok')"
 
   docker:
     name: Agent image (GHCR, ARM64)
