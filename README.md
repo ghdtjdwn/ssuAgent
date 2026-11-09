@@ -113,6 +113,12 @@ uv run pytest tests/test_eval_routing.py
 
 환경 변수의 보안 의미와 운영 차이는 [설정 문서](docs/configuration.md)에 있다.
 
+Supervisor 라우팅 계약은 `evals/routing_contract.v1.json`의 버전 고정 corpus로 검증한다. corpus는
+9개 질의(도메인 라우팅 6, 직접 응답 3)와 네 가지 실패 유형을 포함한다. 테스트는 fake chat model이
+도구를 선택한 뒤의 실제 라우팅 도구, marker parser, graph 목적지를 확인하며 외부 LLM을 호출하지
+않는다. 따라서 결과는 live-model 도구 선택 정확도가 아니라 결정론적 후속 라우팅 계약의 회귀 근거다.
+경계와 재현 방법은 [`evals/README.md`](evals/README.md)에 기록했다.
+
 ## 배포와 운영
 
 production은 단일 ARM64 VM의 Docker Compose service다. 2026-10-15에 k3s + ArgoCD에서 옮겼으며 이유와
@@ -130,12 +136,6 @@ main merge → CI (Ruff·pytest) → ARM64 image → ghcr.io/ghdtjdwn/ssuagent:s
   commit. `GET /ready`: PostgreSQL pool과 checkpointer를 bounded query로 확인(자동 반영의 성공 기준).
   `GET /healthz/deep`: upstream MCP 진단.
 - 배포가 반영되지 않았을 때의 확인 순서는 [배포 문서](docs/deploy.md)에 있다.
-
-Supervisor 라우팅 계약은 `evals/routing_contract.v1.json`의 버전 고정 corpus로 검증한다. corpus는
-9개 질의(도메인 라우팅 6, 직접 응답 3)와 네 가지 실패 유형을 포함한다. 테스트는 fake chat model이
-도구를 선택한 뒤의 실제 라우팅 도구, marker parser, graph 목적지를 확인하며 외부 LLM을 호출하지
-않는다. 따라서 결과는 live-model 도구 선택 정확도가 아니라 결정론적 후속 라우팅 계약의 회귀 근거다.
-경계와 재현 방법은 [`evals/README.md`](evals/README.md)에 기록했다.
 
 ## 문서
 

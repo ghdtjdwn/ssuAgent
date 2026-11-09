@@ -118,6 +118,12 @@ uv run pytest tests/test_eval_routing.py
 See the [configuration guide](docs/configuration.md) for each variable's security meaning and the
 difference between local and production settings.
 
+The versioned routing corpus contains nine prompts: six domain handoffs and
+three direct answers, classified against four failure types. The test uses a fake chat model while
+executing the real routing tools, markers, parser, and graph destinations after tool selection. It
+is not a live-model tool-selection accuracy result. See [`evals/README.md`](evals/README.md) for the
+evidence boundary.
+
 ## Deployment and operations
 
 Production is a Docker Compose service on a single ARM64 VM. It moved off k3s + ArgoCD on 2026-10-15;
@@ -135,12 +141,6 @@ main merge → CI (Ruff, pytest) → ARM64 image → ghcr.io/ghdtjdwn/ssuagent:s
   running commit. `GET /ready`: bounded PostgreSQL pool and checkpointer probe (the success criterion of
   the automatic rollout). `GET /healthz/deep`: upstream MCP diagnostics.
 - The [deployment guide](docs/deploy.md) (Korean) lists what to check when a deploy did not land.
-
-The versioned routing corpus contains nine prompts: six domain handoffs and
-three direct answers, classified against four failure types. The test uses a fake chat model while
-executing the real routing tools, markers, parser, and graph destinations after tool selection. It
-is not a live-model tool-selection accuracy result. See [`evals/README.md`](evals/README.md) for the
-evidence boundary.
 
 ## Documentation
 
