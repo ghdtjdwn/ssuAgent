@@ -82,6 +82,7 @@ POST /agent/resume   {"thread_id": "…", "approved": true, "action_id": 314}
 | --- | --- |
 | Another user resuming an existing conversation | Stable principal hash and thread-owner binding — [ADR 0010](docs/adr/0010-agent-thread-ownership-binding.md) · [security tests](tests/test_main_security.py) |
 | Long-lived checkpoints retaining capabilities or personal data | Request-scoped capabilities, ownership-checked deletion, and bounded 30-day retention — [ADR 0023](docs/adr/0023-conversation-lifecycle-and-edge-identity.md) |
+| Proxy egress sharing a single rate-limit bucket | Verified BFF-signed principal/IP pseudonym selects a per-user bucket — [edge tests](tests/test_main_security.py) |
 | Broken resume semantics after stream reconnect or interrupt | Stable thread and explicit `resume` event ordering — [stream contract tests](tests/test_stream_interrupt.py) |
 | A clear LMS export timing out in another LLM turn | Conservative direct routing and deterministic link generation — [ADR 0022](docs/adr/0022-deterministic-lms-export-download.md) · [LMS tests](tests/test_lms_agent.py) |
 | Provider-specific tool-call formats and cascading failures | Configuration-driven provider sequence and agent-local fallback — [factory tests](tests/test_llm_factory.py) · [ADR 0004](docs/adr/0004-multi-provider-llm-fallback.md) |
