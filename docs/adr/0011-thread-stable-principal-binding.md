@@ -88,5 +88,5 @@ ssuAI가 이미 보유한 안정 식별자(`studentId`, SmartID JWT 기반)를 �
 - **얻는 것**: principal이 실제로 도착하므로 재로그인·멀티기기에서도 히스토리가 보존되고, ADR 0010의 세션-회전 결함이 사라진다. 원문 미저장으로 DB 유출 시 실제 신원 노출이 없다.
 - **잃는 것 / 남는 리스크**:
   - **프록시·verifier 의존성**: 로그인 요청은 ssuAI 프록시와 ssuMCP `/api/auth/me`가 모두 가용해야 한다. 짧은 verifier timeout과 401/503 분리로 ownership 강등과 장기 대기를 막는다.
-  - **드랍 위험**: principal로 승격된 스레드는 그 필드가 실려오지 않는 호출을 전부 거부한다. ChatGPT가 `mcp_session_id`를 턴 경계에서 종종 드랍하는 것과 같은 계층의 위험이 `principal`에도 그대로 적용된다(ADR 0036 참고) — 프론트가 매 요청 principal을 빠짐없이 동봉해야 하는 책임이 새로 생긴다.
+  - **드랍 위험**: principal로 승격된 스레드는 그 필드가 실려오지 않는 호출을 전부 거부한다. ChatGPT가 `mcp_session_id`를 턴 경계에서 종종 드랍하는 것과 같은 계층의 위험이 `principal`에도 그대로 적용된다(ssuMCP [ADR 0036](https://github.com/ghdtjdwn/ssuMCP/blob/main/docs/adr/0036-mcp-auth-optin-two-mode.md) 참고) — 프론트가 매 요청 principal을 빠짐없이 동봉해야 하는 책임이 새로 생긴다.
   - **해시 비교라 사람이 읽는 감사 로그가 약해짐**: DB에서 `owner` 컬럼만 봐서는 어떤 학번인지 알 수 없다(의도된 트레이드오프이지만 운영 중 "이 thread 누구 거야?"를 즉시 답하기 어려워진다 — 필요하면 별도 조회 경로를 principal 원문을 아는 상위 계층에서 만들어야 한다).
