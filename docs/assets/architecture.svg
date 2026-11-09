@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1480 900" role="img" aria-labelledby="title desc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans KR', Helvetica, Arial, sans-serif">
   <title id="title">ssuAgent orchestration and deployment architecture</title>
-  <desc id="desc">A trusted Vercel server route verifies bearer identity when present and calls FastAPI with a server-only key. FastAPI binds principal, session, or anonymous thread ownership; runs a LangGraph supervisor and domain agents; persists checkpoints in PostgreSQL; calls ssuMCP over MCP; and falls back across configured LLM providers.</desc>
+  <desc id="desc">A trusted Vercel server route verifies bearer identity when present and calls FastAPI with a server-only key. FastAPI binds principal, session, or anonymous thread ownership; runs a LangGraph supervisor and domain agents; persists checkpoints in PostgreSQL; calls ssuMCP over MCP; and falls back across configured LLM providers. The ARM64 image is built by GitHub Actions, published to GHCR, and pulled by a host timer onto a single Docker Compose host behind a Caddy HTTPS edge.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
       <path d="M0 0 L10 5 L0 10 z" fill="#1f2328"/>
@@ -75,21 +75,23 @@
     <text x="333" y="574" font-size="10.8" fill="#475569">never shipped to browser</text>
   </g>
 
-  <!-- k3s boundary -->
+  <!-- Docker Compose host boundary -->
   <g>
-    <rect x="582" y="112" width="580" height="658" rx="12" fill="#f8fafc" stroke="#326ce5" stroke-width="2.2"/>
-    <rect x="582" y="112" width="38" height="38" fill="#326ce5"/>
-    <path d="M590 131 l11 -7 11 7 v12 h-22 z M601 124 v19" fill="none" stroke="#ffffff" stroke-width="1.6"/>
-    <text x="632" y="137" font-size="15" font-weight="700" fill="#1e3a8a">k3s · ssuai-prod</text>
-    <text x="1134" y="137" text-anchor="end" font-size="11" fill="#475569">1 replica · 100–500m CPU · 256–512Mi</text>
+    <rect x="582" y="112" width="580" height="658" rx="12" fill="#f8fafc" stroke="#2496ed" stroke-width="2.2"/>
+    <rect x="582" y="112" width="38" height="38" fill="#2496ed"/>
+    <path d="M590 129 h6 v6 h-6 z M598 129 h6 v6 h-6 z M606 129 h6 v6 h-6 z M598 121 h6 v6 h-6 z" fill="#ffffff"/>
+    <path d="M588 139 h26" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round"/>
+    <text x="632" y="137" font-size="15" font-weight="700" fill="#1e3a8a">Docker Compose · single ARM64 host</text>
+    <text x="1134" y="137" text-anchor="end" font-size="11" fill="#475569">1 container · 512Mi memory limit</text>
 
-    <rect x="611" y="171" width="238" height="62" rx="9" fill="#ffffff" stroke="#8b5cf6"/>
-    <rect x="628" y="186" width="32" height="32" rx="7" fill="#8b5cf6"/>
-    <path d="M635 202 h18 M644 193 v18" stroke="#ffffff" stroke-width="2"/>
-    <text x="675" y="196" font-size="12.8" font-weight="700" fill="#0f172a">Traefik HTTPS ingress</text>
-    <text x="675" y="216" font-size="10.7" fill="#475569">ssuagent.duckdns.org</text>
+    <rect x="611" y="171" width="359" height="62" rx="9" fill="#ffffff" stroke="#0f766e"/>
+    <rect x="628" y="186" width="32" height="32" rx="7" fill="#0f766e"/>
+    <rect x="637" y="201" width="14" height="11" rx="2" fill="#ffffff"/>
+    <path d="M640 201 v-3 a4 4 0 0 1 8 0 v3" fill="none" stroke="#ffffff" stroke-width="2"/>
+    <text x="675" y="196" font-size="12.8" font-weight="700" fill="#0f172a">Caddy HTTPS edge</text>
+    <text x="675" y="216" font-size="10.7" fill="#475569">ssuagent.duckdns.org · Let's Encrypt · SSE unbuffered</text>
 
-    <!-- FastAPI pod -->
+    <!-- FastAPI container -->
     <rect x="611" y="257" width="359" height="478" rx="11" fill="#ffffff" stroke="#059669" stroke-width="2.2"/>
     <rect x="611" y="257" width="359" height="58" rx="11" fill="#ecfdf5"/>
     <rect x="611" y="301" width="359" height="14" fill="#ecfdf5"/>
@@ -130,7 +132,7 @@
     <path d="M681 586 V594 M790 586 V594 M899 586 V594" stroke="#7c3aed" stroke-width="2.3"/>
 
     <rect x="634" y="681" width="313" height="34" rx="7" fill="#111827"/>
-    <text x="790" y="703" text-anchor="middle" font-size="11.5" font-weight="650" fill="#ffffff">MCP client · dynamic tools · one retry on transport failure</text>
+    <text x="790" y="703" text-anchor="middle" font-size="10.6" font-weight="650" fill="#ffffff">MCP client · dynamic tools · one retry on transport failure</text>
 
     <!-- Stateful dependencies -->
     <rect x="997" y="257" width="137" height="150" rx="9" fill="#eef4fb" stroke="#3b82f6"/>
@@ -142,17 +144,17 @@
 
     <rect x="997" y="433" width="137" height="106" rx="9" fill="#fff7ed" stroke="#fb923c"/>
     <text x="1065" y="459" text-anchor="middle" font-size="12.2" font-weight="700" fill="#9a3412">Runtime constraint</text>
-    <text x="1065" y="478" text-anchor="middle" font-size="10.1" fill="#475569">limiter sees proxy egress</text>
+    <text x="1065" y="478" text-anchor="middle" font-size="10.1" fill="#475569">signed identity buckets</text>
     <text x="1065" y="495" text-anchor="middle" font-size="10.1" fill="#475569">process-local · 1 replica</text>
-    <text x="1065" y="512" text-anchor="middle" font-size="10.1" fill="#475569">scale-out needs trusted IP</text>
-    <text x="1065" y="529" text-anchor="middle" font-size="10.1" fill="#475569">forwarding + shared store</text>
+    <text x="1065" y="512" text-anchor="middle" font-size="10.1" fill="#475569">scale-out needs</text>
+    <text x="1065" y="529" text-anchor="middle" font-size="10.1" fill="#475569">a shared limiter store</text>
 
     <rect x="997" y="565" width="137" height="109" rx="9" fill="#f5f3ff" stroke="#8b5cf6"/>
     <rect x="1031" y="584" width="29" height="23" rx="3" fill="#7c3aed"/>
     <path d="M1036 584 v-6 a9 9 0 0 1 18 0 v6" fill="none" stroke="#7c3aed" stroke-width="2.4"/>
-    <text x="1065" y="625" text-anchor="middle" font-size="12.2" font-weight="700" fill="#5b21b6">Kubernetes Secret</text>
+    <text x="1065" y="625" text-anchor="middle" font-size="12.2" font-weight="700" fill="#5b21b6">Host env file</text>
     <text x="1065" y="647" text-anchor="middle" font-size="10.3" fill="#475569">agent key · DB URL</text>
-    <text x="1065" y="664" text-anchor="middle" font-size="10.3" fill="#475569">configured provider keys</text>
+    <text x="1065" y="664" text-anchor="middle" font-size="10.3" fill="#475569">LLM keys · not in Git</text>
   </g>
 
   <!-- External dependencies -->
@@ -185,8 +187,8 @@
   <path d="M250 315 H305" fill="none" stroke="#2563eb" stroke-width="3" marker-end="url(#arrowBlue)"/>
   <text x="271" y="303" text-anchor="middle" font-size="10.5" font-weight="650" fill="#2563eb">POST</text>
   <path d="M538 319 C568 319 570 202 603 202" fill="none" stroke="#2563eb" stroke-width="3" marker-end="url(#arrowBlue)"/>
-  <path d="M730 233 V249" fill="none" stroke="#2563eb" stroke-width="3" marker-end="url(#arrowBlue)"/>
-  <text x="790" y="247" text-anchor="middle" font-size="10.8" font-weight="650" fill="#2563eb">X-Agent-Key + optional verified principal</text>
+  <path d="M640 233 V249" fill="none" stroke="#2563eb" stroke-width="3" marker-end="url(#arrowBlue)"/>
+  <text x="658" y="247" font-size="10.8" font-weight="650" fill="#2563eb">X-Agent-Key + optional verified principal</text>
 
   <path d="M611 332 C560 332 562 407 538 407" fill="none" stroke="#7c3aed" stroke-width="3" marker-end="url(#arrowPurple)"/>
   <path d="M288 407 H250" fill="none" stroke="#7c3aed" stroke-width="3" marker-end="url(#arrowPurple)"/>
@@ -213,14 +215,14 @@
     <text x="395" y="830" font-size="12.3" font-weight="700" fill="#0f172a">GHCR</text>
     <text x="395" y="849" font-size="10.6" fill="#475569">sha-&lt;commit&gt;</text>
     <path d="M499 834 H576" fill="none" stroke="#1f2328" stroke-width="2.2" marker-end="url(#arrow)"/>
-    <text x="592" y="830" font-size="12.3" font-weight="700" fill="#0f172a">Image Updater</text>
-    <text x="592" y="849" font-size="10.6" fill="#475569">Git write-back</text>
+    <text x="592" y="830" font-size="12.3" font-weight="700" fill="#0f172a">Autodeploy timer</text>
+    <text x="592" y="849" font-size="10.6" fill="#475569">host systemd · every 15 min</text>
     <path d="M730 834 H807" fill="none" stroke="#1f2328" stroke-width="2.2" marker-end="url(#arrow)"/>
-    <text x="823" y="830" font-size="12.3" font-weight="700" fill="#0f172a">ArgoCD</text>
-    <text x="823" y="849" font-size="10.6" fill="#475569">auto-sync · self-heal</text>
+    <text x="823" y="830" font-size="12.3" font-weight="700" fill="#0f172a">Compose replace</text>
+    <text x="823" y="849" font-size="10.6" fill="#475569">pinned tag@digest</text>
     <path d="M957 834 H1034" fill="none" stroke="#1f2328" stroke-width="2.2" marker-end="url(#arrow)"/>
-    <text x="1050" y="830" font-size="12.3" font-weight="700" fill="#0f172a">Helm rollout</text>
-    <text x="1050" y="849" font-size="10.6" fill="#475569">one ssu-agent pod</text>
-    <text x="1408" y="839" text-anchor="end" font-size="10.6" fill="#64748b">No Redis dependency; PostgreSQL persists graph state.</text>
+    <text x="1050" y="830" font-size="12.3" font-weight="700" fill="#0f172a">Public /ready check</text>
+    <text x="1050" y="849" font-size="10.6" fill="#475569">fail → previous image</text>
+    <text x="1408" y="839" text-anchor="end" font-size="10.6" fill="#64748b">PostgreSQL persists graph state; no Redis.</text>
   </g>
 </svg>

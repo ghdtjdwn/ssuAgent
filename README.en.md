@@ -129,7 +129,7 @@ evidence boundary.
 - [Documentation map](docs/README.md)
 - [Architecture and trust boundaries](docs/architecture.md) (Korean)
 - [Configuration and environment variables](docs/configuration.md) (Korean)
-- [GitOps deployment and operational verification](docs/deploy.md) (Korean)
+- [Docker Compose deployment and operational verification](docs/deploy.md) (Korean)
 - [Operational incident records](docs/troubleshooting.md) (Korean)
 - [ADR index](docs/adr/README.md) (Korean)
 
