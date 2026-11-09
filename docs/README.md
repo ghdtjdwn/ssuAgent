@@ -11,9 +11,9 @@
 
 ## 설계 결정
 
-- [ADR 디렉터리](adr/)
+- [ADR 색인](adr/README.md) — 19개 ADR의 번호·날짜·상태·한 줄 요약
 - [Supervisor architecture](adr/0001-supervisor-architecture.md)
-- [PostgreSQL checkpointer](adr/003-postgres-checkpointer.md)
+- [PostgreSQL checkpointer](adr/0003-postgres-checkpointer.md)
 - [Agent edge hardening](adr/0009-agent-edge-hardening.md)
 - [Thread ownership binding](adr/0010-agent-thread-ownership-binding.md)
 - [Stable principal binding](adr/0011-thread-stable-principal-binding.md)

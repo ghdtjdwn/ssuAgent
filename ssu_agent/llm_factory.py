@@ -2,12 +2,15 @@
 LLM factory with multi-provider fallback.
 
 Provider priority:
-  0. Anthropic Claude Haiku 4.5 — used first when ANTHROPIC_API_KEY is set
-     (paid; temporary dev/testing). Falls back to the configured providers below on
-     error or when the key is unset.
+  0. Anthropic Claude (ANTHROPIC_MODEL, default claude-haiku-4-5) — optional;
+     joins the sequence first only when ANTHROPIC_API_KEY is set (ADR 0015).
+     Without the key the sequence starts at 1.
   1. Groq Llama-3.3-70b
   2. Google Gemini
   3. OpenRouter
+
+Only configured providers are instantiated; the order is configuration-driven
+and does not claim a cost or accuracy advantage.
 
 Provider pricing, model availability, and organization-level quotas change
 outside this repository. They are runtime constraints, not part of the tested
@@ -18,9 +21,10 @@ generic ChatOpenAI wrapper serializes assistant content as a list of
 content blocks, which Groq's API rejects with a 400 on the second tool
 call turn. ChatGroq handles the string-content conversion internally.
 
-NOTE: langchain_core 1.4.x RunnableWithFallbacks lacks bind_tools, so
-with_fallbacks() breaks when create_react_agent calls model.bind_tools()
-internally. Use get_llm_sequence() + per-agent retry loops instead.
+NOTE: langchain_core's RunnableWithFallbacks has no bind_tools (re-checked
+on 1.7.x), so with_fallbacks() breaks when create_react_agent calls
+model.bind_tools() internally. Use get_llm_sequence() + per-agent retry loops
+instead.
 """
 
 from __future__ import annotations
@@ -93,6 +97,6 @@ def create_llm() -> BaseChatModel:
     if not sequence:
         raise RuntimeError(
             "No LLM provider API key configured "
-            "(set GROQ_API_KEY / GOOGLE_API_KEY / OPENROUTER_API_KEY)"
+            "(set ANTHROPIC_API_KEY / GROQ_API_KEY / GOOGLE_API_KEY / OPENROUTER_API_KEY)"
         )
     return sequence[0]

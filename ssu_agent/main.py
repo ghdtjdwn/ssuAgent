@@ -2,9 +2,12 @@
 FastAPI app — SSE streaming entry point for ssuAgent.
 
 Endpoints:
-  POST /agent/stream   — start or continue a conversation, stream SSE
-  POST /agent/resume   — resume after HITL interrupt (user approval/denial)
-  GET  /health         — liveness check
+  POST   /agent/stream               — start or continue a conversation, stream SSE
+  POST   /agent/resume               — resume after HITL interrupt (user approval/denial)
+  DELETE /agent/threads/{thread_id}  — delete a thread's checkpoints after ownership check
+  GET    /health                     — liveness check
+  GET    /ready                      — readiness: Postgres pool + checkpointer probe
+  GET    /healthz/deep               — readiness including the MCP server connection
 
 SSE event types emitted:
   {"type": "text",    "content": "..."}    — final answer text chunk
@@ -12,6 +15,7 @@ SSE event types emitted:
   {"type": "tool",    "name": "..."}       — tool call started (Korean UX label via _TOOL_LABELS)
   {"type": "interrupt","data": {...}}       — HITL payload awaiting user decision
   {"type": "done"}                          — graph reached END
+  {"type": "error",   "message": "..."}    — graph failed; fixed text, never the exception string
 
 MCP session lifecycle (thread_id ↔ mcp_session_id ↔ principal):
   Every FastAPI request carries a `thread_id` (stable per user/device) used
@@ -585,7 +589,9 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.ALLOWED_ORIGINS,
-    # Narrowed from "*": the API only serves POST /agent/* and GET /health.
+    # Narrowed from "*": browsers reach POST /agent/stream|resume and the GET
+    # health routes through the ssuAI BFF. DELETE /agent/threads/{id} is
+    # server-to-server only and is intentionally not CORS-exposed.
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )

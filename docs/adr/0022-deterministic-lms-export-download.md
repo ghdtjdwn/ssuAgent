@@ -5,7 +5,7 @@
 | 날짜 | 2026-07-17 |
 | 상태 | Accepted |
 | 범위 | LMS agent 라우팅, 전체 자료 내보내기, 다운로드 링크 응답 |
-| 관련 | [ADR 0001](0001-supervisor-architecture.md), [ADR 005](005-router-bug-fix-prepare-collision.md) |
+| 관련 | [ADR 0001](0001-supervisor-architecture.md), [ADR 0005](0005-router-bug-fix-prepare-collision.md) |
 
 ## 배경과 실제 증상
 

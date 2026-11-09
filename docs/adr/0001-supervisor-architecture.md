@@ -3,7 +3,7 @@
 작성일: 2026-06-14  
 상태: 확정(구현 완료)
 
-> **갱신 (2026-07-02)**: §3·§6·§8이 기술하는 SQLite(`SqliteSaver`) 체크포인터는 이후 [ADR 003](003-postgres-checkpointer.md)에서 `AsyncPostgresSaver`(Postgres)로 대체됐다(현행 코드 `main.py`). 현행 체크포인터는 ADR 003을 참조. 나머지 아키텍처 결정은 그대로 유효하다.
+> **갱신 (2026-07-02)**: §3·§6·§8이 기술하는 SQLite(`SqliteSaver`) 체크포인터는 이후 [ADR 0003](0003-postgres-checkpointer.md)에서 `AsyncPostgresSaver`(Postgres)로 대체됐다(현행 코드 `main.py`). 현행 체크포인터는 ADR 0003을 참조. 나머지 아키텍처 결정은 그대로 유효하다.
 >
 > **갱신 (2026-07-15)**: 수퍼바이저의 deprecated `langgraph.prebuilt.create_react_agent` 호출을 공식 후속 API인 `langchain.agents.create_agent`로 교체했다. 정적 prompt 인자는 `system_prompt`로 바뀌었지만 Route Marker + Post-Router 계약, provider 폴백 순서, 부모 그래프 전이는 유지된다. §2와 §8의 1.2.4 표기는 최초 결정 당시의 검증 기록이다.
 
