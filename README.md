@@ -124,7 +124,7 @@ Supervisor 라우팅 계약은 `evals/routing_contract.v1.json`의 버전 고정
 - [문서 지도](docs/README.md)
 - [아키텍처와 신뢰 경계](docs/architecture.md)
 - [설정과 환경 변수](docs/configuration.md)
-- [GitOps 배포와 운영 검증](docs/deploy.md)
+- [Docker Compose 배포와 운영 검증](docs/deploy.md)
 - [운영 장애 기록](docs/troubleshooting.md)
 - [ADR 색인](docs/adr/README.md)
 
