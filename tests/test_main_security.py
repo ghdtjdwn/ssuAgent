@@ -192,7 +192,17 @@ def test_security_config_rejects_non_positive_cleanup_interval(
 def test_health_open(client: TestClient):
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json()["status"] == "UP"
+    body = resp.json()
+    assert body["status"] == "UP"
+    assert body["version"] == main.app.version
+    assert body["build_sha"] == config.BUILD_SHA
+
+
+def test_health_reports_build_sha(monkeypatch: pytest.MonkeyPatch, client: TestClient):
+    monkeypatch.setattr(config, "BUILD_SHA", "0123456789abcdef0123456789abcdef01234567")
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json()["build_sha"] == "0123456789abcdef0123456789abcdef01234567"
 
 
 def test_deep_health_reports_mcp_up(monkeypatch: pytest.MonkeyPatch, client: TestClient):

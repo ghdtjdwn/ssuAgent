@@ -67,6 +67,12 @@ scrub, explicit DELETE, retention과 saver trigger는 모두 owner row를 먼저
 Groq와 OpenRouter model은 현재 `ssu_agent/llm_factory.py`에서 고정한다. model 변경은 provider별
 tool-call 형식과 routing/safety 평가를 함께 검증한다.
 
+## 빌드 메타데이터
+
+| 변수 | 기본값 | 역할 |
+| --- | --- | --- |
+| `SSUAGENT_BUILD_SHA` | `unknown` | image를 만든 commit SHA. Dockerfile이 CI build-arg `GIT_SHA`로 채우며 `GET /health`의 `build_sha`로 노출된다. 운영자가 설정하는 값이 아니다 |
+
 ## 로컬 로딩
 
 ```bash

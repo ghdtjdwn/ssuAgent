@@ -5,7 +5,7 @@ Endpoints:
   POST   /agent/stream               — start or continue a conversation, stream SSE
   POST   /agent/resume               — resume after HITL interrupt (user approval/denial)
   DELETE /agent/threads/{thread_id}  — delete a thread's checkpoints after ownership check
-  GET    /health                     — liveness check
+  GET    /health                     — liveness check (+ version, build_sha)
   GET    /ready                      — readiness: Postgres pool + checkpointer probe
   GET    /healthz/deep               — readiness including the MCP server connection
 
@@ -1269,7 +1269,7 @@ async def resume_agent(request: Request, req: ResumeRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "UP", "version": app.version}
+    return {"status": "UP", "version": app.version, "build_sha": config.BUILD_SHA}
 
 
 @app.get("/ready")
