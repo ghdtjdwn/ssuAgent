@@ -85,7 +85,7 @@ POST /agent/resume   {"thread_id": "…", "approved": true, "action_id": 314}
 | provider별 tool-call 형식 차이와 장애 전파 | 설정 기반 provider sequence와 agent-local fallback — [factory tests](tests/test_llm_factory.py) · [ADR 0004](docs/adr/0004-multi-provider-llm-fallback.md) |
 | handoff가 답변을 중복하거나 잘못된 도구를 고르는 문제 | routing/safety 평가 세트 — [routing eval](tests/test_eval_routing.py) · [safety eval](tests/test_eval_safety.py) |
 | 검증되지 않은 이미지의 자동 배포 | Ruff·format·pytest 뒤 ARM64 image publish, PR에서는 빌드한 이미지 안에서 `import ssu_agent.main` smoke 실행 — [CI workflow](.github/workflows/ci.yml) · [deployment guide](docs/deploy.md) |
-| 정적 보안 회귀와 stale dependency | CodeQL v4 Python 분석, uv·GitHub Actions Dependabot — [CodeQL](.github/workflows/codeql.yml) · [Dependabot](.github/dependabot.yml) |
+| 정적 보안 회귀와 stale dependency | CodeQL v4 Python 분석 — [CodeQL](.github/workflows/codeql.yml) |
 
 주요 스택은 Python 3.12, FastAPI, LangGraph, LangChain, PostgreSQL checkpointer, MCP Streamable
 HTTP, SSE, uv, Ruff, pytest, Docker와 Docker Compose다.
