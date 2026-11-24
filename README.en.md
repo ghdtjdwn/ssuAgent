@@ -88,7 +88,7 @@ POST /agent/resume   {"thread_id": "…", "approved": true, "action_id": 314}
 | Provider-specific tool-call formats and cascading failures | Configuration-driven provider sequence and agent-local fallback — [factory tests](tests/test_llm_factory.py) · [ADR 0004](docs/adr/0004-multi-provider-llm-fallback.md) |
 | Handoffs duplicating answers or choosing the wrong tool | Routing and safety evaluation sets — [routing eval](tests/test_eval_routing.py) · [safety eval](tests/test_eval_safety.py) |
 | Deployment of an unverified image | ARM64 image publication follows Ruff, formatting, and pytest; pull requests also run `import ssu_agent.main` inside the built image — [CI workflow](.github/workflows/ci.yml) · [deployment guide](docs/deploy.md) |
-| Static security regressions and stale dependencies | CodeQL v4 Python analysis plus uv and GitHub Actions Dependabot — [CodeQL](.github/workflows/codeql.yml) · [Dependabot](.github/dependabot.yml) |
+| Static security regressions and stale dependencies | CodeQL v4 Python analysis — [CodeQL](.github/workflows/codeql.yml) |
 
 The main stack is Python 3.12, FastAPI, LangGraph, LangChain, PostgreSQL checkpointer, MCP
 Streamable HTTP, SSE, uv, Ruff, pytest, Docker, and Docker Compose.
